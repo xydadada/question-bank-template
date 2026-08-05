@@ -1,0 +1,21 @@
+name: audit
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  public-template-audit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run python -m unittest discover -s tests -v
+      - shell: pwsh
+        run: ./scripts/release-audit.ps1

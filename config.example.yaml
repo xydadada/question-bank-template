@@ -1,0 +1,275 @@
+folders:
+  inbox: inbox
+  work: work
+  markdown: markdown
+  failed: failed
+  archives: archives
+
+classification:
+  archive_executable: 7z
+  archive_extensions:
+    - .zip
+    - .7z
+    - .rar
+    - .tar
+    - .tar.gz
+    - .tgz
+    - .tar.bz2
+    - .tbz2
+    - .tar.xz
+    - .txz
+    - .tar.zst
+    - .tzst
+  video_extensions:
+    - .mp4
+    - .mkv
+    - .avi
+    - .mov
+    - .wmv
+    - .flv
+    - .webm
+    - .m4v
+    - .mpg
+    - .mpeg
+    - .3gp
+    - .ts
+    - .mts
+    - .m2ts
+    - .vob
+    - .rm
+    - .rmvb
+  transient_extensions:
+    - .downloading
+    - .crdownload
+    - .part
+    - .tmp
+  max_archive_depth: 5
+  max_archive_files: 50000
+  max_expanded_gb: 100
+  min_free_gb_after_extract: 100
+  delete_videos: false
+  delete_archives_after_extract: false
+  unsupported_to_failed: true
+
+document_classification:
+  enabled: true
+  taxonomy_file: profiles/physics-question-bank.yaml
+  max_mimo_chars: 12000
+  mimo_min_confidence: 0.75
+  other_min_confidence: 0.90
+  version: 3
+  inject_visible_line: true
+  delete_other_source_after_markdown: false
+
+mineru:
+  base_url: https://mineru.net/api/v4
+  model_version: vlm
+  language: ch
+  poll_seconds: 60
+  submission_workers_per_key: 1
+  submission_workers_max: auto
+  timeout_seconds: 86400
+  max_pages: 200
+  split_pages: 190
+  waiting_file_resubmit_seconds: 600
+  consume_round_seconds: 60
+  max_mb: 200
+  save_content_json: false
+
+ollama:
+  base_url: http://127.0.0.1:11434
+  vision_model: qwen3.5:0.8b
+  classification_model: qwen3:0.6b
+  classification_context_chars: auto
+  classification_keep_alive: auto
+  context_chars: 500
+  render_dpi: 120
+  max_image_side: 1600
+  # 图片内容统一交给MiMo；保留OCR依赖但不在当前流程调用。
+  ocr_enabled: false
+  ocr_version: PP-OCRv5
+  ocr_min_chars: 12
+  mimo:
+    enabled: true
+    base_url: https://api.xiaomimimo.com/v1
+    model: mimo-v2.5
+    timeout_seconds: 180
+    classification_timeout_seconds: 30
+    classification_max_key_attempts: 1
+    max_key_attempts: 3
+    max_completion_tokens: 256
+    # 每个Key最多允许4个独立请求同时在途：前一张尚未回答时即可发送下一张。
+    # 理论并发按“有效Key数×4”计算，但总上限固定为32；
+    # 从已验证稳定的28路起步，弹性上限开放到32。
+    # 遇到429、超时或低内存时仍会自动收缩，不强制占满。
+    initial_parallel: 2
+    max_parallel: auto
+    parallel_per_key: 2
+    parallel_cap: 8
+    # 单个云端请求只暂存一张已缩小图片；仅在内存极端紧张时收回第2路。
+    memory_floor_gb: 0.3
+    memory_full_parallel_gb: 0.55
+    increase_every_successes: 8
+    rate_limit_cooldown_seconds: 120
+    # 小米接口批量图片曾反复出现编号缺失或错位。保持多请求流水并发，
+    # 但每个请求只发送1张图，因此请求之间不会混淆图片编号。
+    image_batch_initial: 1
+    image_batch_max: 1
+    image_batch_increase_every: 4
+    image_batch_max_completion_tokens: 1024
+    # MiMo是唯一图片理解模型；失败时保留源文件等待重试。
+    fallback_to_ollama: false
+    classification_fallback_to_ollama: false
+
+pairing:
+  parse_all_before_merge: true
+  group_identity: logical_name_and_content_sha256
+  missing_answer: empty
+  unmatched_answer_indexed: false
+  # 子块按段落和题答边界切分；1200是基准，不是固定长度。
+  # 程序按资料类型和字段在800至1600字符之间弹性调整。
+  child_chars: 1200
+
+weknora:
+  enabled: true
+  command_parallel: auto
+  embedding_parallel: auto
+  knowledge_base: "__PARENT_KB_ID__"
+  parent_knowledge_base: "__PARENT_KB_ID__"
+  child_knowledge_base: "__CHILD_KB_ID__"
+  raw_knowledge_base: "__RAW_KB_ID__"
+  profile: local
+  setup_profile: local
+  verification_limit: 50
+  # 0表示接受WeKnora知识库当前的分块设置；需要强制校验时填正整数。
+  chunk_sizes:
+    parent: 0
+    child: 0
+    raw: 0
+  document_type_weights:
+    试卷: 1.28
+    习题册: 1.24
+    讲义: 1.14
+    教材: 0.86
+  layer_weights:
+    parent: 1.06
+    child: 1.10
+    raw: 0.94
+  # 每份做父块、子块和原文混合检索；启动首份及每50组再独立检查向量和BM25。
+  full_route_check_every: 50
+  models:
+    # provider字段只描述Embedding；Wiki、摘要和图谱文本模型单独走云端MiMo。
+    provider: ollama
+    chat_provider: mimo
+    chat: mimo-v2.5-pro
+    vision_provider: mimo
+    vision: mimo-v2.5
+    embedding: qwen3-embedding:0.6b
+    embedding_dimension: 1024
+    rerank: null
+  features:
+    # 仅父块库开启；子块库和原文库继续关闭，避免三份重复生成。
+    summaries: false
+    wiki: false
+    graph: false
+  upload_command:
+    - "{root}/bin/weknora.exe"
+    - doc
+    - upload
+    - "{file}"
+    - --kb
+    - "{kb}"
+    - --format
+    - json
+    - --profile
+    - "{profile}"
+  wait_command:
+    - "{root}/bin/weknora.exe"
+    - doc
+    - wait
+    - "{doc_id}"
+    - --timeout
+    - 1h
+    - --format
+    - json
+    - --profile
+    - "{profile}"
+  search_command:
+    - "{root}/bin/weknora.exe"
+    - search
+    - chunks
+    - "{query}"
+    - --kb
+    - "{kb}"
+    - --format
+    - json
+    - --profile
+    - "{profile}"
+
+resource_control:
+  mode: auto
+  local_processing_workers_max: 2
+  local_processing_workers_min: 1
+  # 同一处理状态内按两个轻量资料组搭配一个重型资料组，避免大书占满全部通道。
+  group_mix_light_per_heavy: 2
+  # 本地阶段按短窗口内存中位数重算，避免在阈值附近频繁升降。
+  # Python编排进程共享依赖，实测常驻约150MB；按0.5GB计入图片瞬时余量。
+  local_worker_memory_gb: 0.5
+  memory_hysteresis_samples: 3
+  # 低于1.0GB立即回到单通道；连续高于1.8GB后才允许短时扩容。
+  # 低于0.65GB进入硬暂停，至少恢复到1.0GB后才重新启动资料准备。
+  # 这些阈值只控制本项目的新任务，不会终止或调整其他程序。
+  critical_windows_free_gb: 1.0
+  scale_up_windows_free_gb: 1.8
+  # 已提交的旧索引排空期间，低于此值不再启动新的资料准备或上传。
+  hard_pause_windows_free_gb: 0.65
+  # 以单独低优先级通道恢复历史MinerU结果；与正常流程共享MiMo请求闸门。
+  source_recovery_background: true
+  # 0表示恢复全部可恢复记录；不重新提交MinerU，不产生重复解析任务。
+  source_recovery_limit_per_run: 0
+  # 正常资料和缺源恢复全部排空后，顺序迁移历史完成资料到新版三层结构。
+  # 迁移先验证新三层再切换状态并删除旧索引；0表示持续处理全部历史组。
+  historical_content_migration_after_batch: true
+  historical_content_migration_limit_per_run: 0
+  # 历史迁移只允许1组准备缓冲：当前组在WeKnora索引时，下一组可并行进行
+  # MinerU结果恢复、MiMo补图和落盘准备；可用内存不足时自动退回完全串行。
+  content_migration_pipeline_enabled: true
+  content_migration_pipeline_min_free_gb: 2.0
+  # 服务或电脑重启后，尽快接管已经上传但尚未本地收尾的三层索引。
+  indexing_resume_after_seconds: 30
+  # 上传前占用名额，直到父子索引和检索验证完成才释放。
+  # 16GB内存最多同时保留2个服务器端入库组，低内存立即缩到1路。
+  weknora_inflight_groups_min: 1
+  weknora_inflight_groups_max: 2
+  # 允许准备好1组等待索引，减少GPU索引任务之间的空档；不堆积长队列。
+  weknora_index_queue_buffer_groups: 1
+  weknora_index_extra_memory_gb: 0.75
+  # 队列出现时允许利用安全余量短时增容；低于安全线仍立即收缩。
+  weknora_index_burst_free_gb: 0.75
+  prequeue_workers_max: 4
+  weknora_command_parallel_max: 3
+  # CLI本身很轻，主要内存位于共享的WeKnora/PostgreSQL服务。
+  weknora_command_memory_gb: 0.5
+  weknora_command_burst_free_gb: 0.75
+  # 内存下降时立即收缩；上升至少稳定30秒后再扩容，避免并发来回抖动。
+  weknora_concurrency_increase_hold_seconds: 30
+  # 保留约0.94GB给Windows和前台程序；不足时弹性闸门自动缩回单通道。
+  reserve_windows_memory_ratio: 0.06
+  reserve_windows_memory_min_gb: 0.9
+  # 仅当日志和数据库20分钟均无进展、WeKnora没有索引任务且GPU空闲时，
+  # 监督进程才重启本项目的ingest子进程。
+  stall_watchdog_seconds: 1200
+  stall_watchdog_poll_seconds: 60
+  stall_watchdog_gpu_active_percent: 10
+  stall_watchdog_max_restarts_per_hour: 3
+
+cleanup:
+  permanently_delete_source_after_search: false
+  delete_temporary_files: true
+
+mcp_public:
+  proxy_version: v2.10.2
+  listen_addr: 127.0.0.1:18081
+  external_url: https://mcp.example.com
+  weknora_profile: local
+  deferred_until_primary_retrieval: true

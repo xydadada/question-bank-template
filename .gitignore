@@ -1,0 +1,39 @@
+# Local configuration and secrets
+.env
+*.local.env
+mineru-keys.env
+mimo-keys.env
+config.local.yaml
+mcp-public/secrets/
+mcp-public/data/
+mcp-public/logs/
+mcp-public/cloudflare/
+mcp-public/*.pid
+
+# User content and generated state
+inbox/
+archives/
+work/
+markdown/
+failed/
+outputs/
+state.db*
+*.log
+*.pid
+.*.lock
+
+# Downloaded/build runtime
+.runtime/
+bin/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+desktop.ini

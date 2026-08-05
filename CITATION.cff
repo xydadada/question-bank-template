@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+message: "If you use this template, cite the repository."
+title: "Question Bank Template"
+type: software
+version: 0.1.0
+date-released: 2026-08-05
+license: MIT
+repository-code: "https://github.com/xydadada/question-bank-template"

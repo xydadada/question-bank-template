@@ -1,0 +1,30 @@
+[project]
+name = "question-bank-ingest"
+version = "0.1.0"
+description = "A privacy-safe Windows and WSL template for MinerU-to-WeKnora question-bank ingestion and retrieval"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+keywords = ["rag", "mineru", "weknora", "mcp", "question-bank"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows :: Windows 11",
+  "Programming Language :: Python :: 3",
+  "Topic :: Education",
+]
+dependencies = [
+  "bcrypt>=4.2",
+  "onnxruntime>=1.23",
+  "rapidocr>=3.9",
+  "pymupdf>=1.26",
+  "pypdf>=5.0",
+  "python-dotenv>=1.0",
+  "pyyaml>=6.0",
+  "requests>=2.32",
+]
+
+[project.urls]
+Homepage = "https://github.com/xydadada/question-bank-template"
+Repository = "https://github.com/xydadada/question-bank-template"
+Issues = "https://github.com/xydadada/question-bank-template/issues"

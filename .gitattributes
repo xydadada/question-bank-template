@@ -1,0 +1,17 @@
+* text=auto
+.gitignore text eol=lf
+.gitattributes text eol=lf
+.env.example text eol=lf
+*.cff text eol=lf
+*.lock text eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.vbs text eol=crlf
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.pdf binary
+*.docx binary
+*.zip binary
+*.7z binary
