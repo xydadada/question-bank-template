@@ -98,7 +98,12 @@ if ($InstallMcpTools) {
 
     $CloudflaredPath = Join-Path $Bin "cloudflared.exe"
     $CloudflaredUrl = "https://github.com/cloudflare/cloudflared/releases/download/2026.7.3/cloudflared-windows-amd64.exe"
+    $CloudflaredSha256 = "8635da433b6df8194746e88ed9d2589566c20e38bfc2a80e431a348b7c765841"
     Download-WithResume $CloudflaredUrl $CloudflaredPath
+    $ActualCloudflaredHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $CloudflaredPath).Hash.ToLowerInvariant()
+    if ($ActualCloudflaredHash -ne $CloudflaredSha256) {
+        throw "cloudflared SHA-256 mismatch. Delete '$CloudflaredPath' before retrying."
+    }
     $Signature = Get-AuthenticodeSignature -LiteralPath $CloudflaredPath
     if ($Signature.Status -ne "Valid" -or $Signature.SignerCertificate.Subject -notmatch "Cloudflare") {
         throw "cloudflared signature validation failed. Delete '$CloudflaredPath' before retrying."
