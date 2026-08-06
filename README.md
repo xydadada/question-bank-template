@@ -29,7 +29,8 @@ inbox 中的文件或压缩包
 - 不提交 `.env`、`config.local.yaml`、知识库内容、Markdown、日志或 `state.db`。
 - 不自动开机启动，不修改 Windows 计划任务；WeKnora 的 8080/8088 只绑定本机回环地址。
 - 不自动永久删除视频、压缩包、“其他资料”或已入库源文件。
-- 开启任何永久删除选项后，仍需在本机 `.env` 明确写入
+- 开启任何永久删除选项，或执行非演练模式的 `--sync-manual-deletions`，
+  都必须在本机 `.env` 明确写入
   `QUESTION_BANK_ALLOW_PERMANENT_DELETE=I_UNDERSTAND`。
 - MCP 使用独立最小权限 Profile；OAuth 代理只监听 `127.0.0.1:18081`。
 - 官方 MCP 不含建库、上传、修改或删除工具；`chat` 与 `session_ask` 会写入会话记录，
