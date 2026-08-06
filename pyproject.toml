@@ -1,6 +1,6 @@
 [project]
 name = "question-bank-ingest"
-version = "0.1.1"
+version = "0.1.2"
 description = "A privacy-safe Windows and WSL template for MinerU-to-WeKnora question-bank ingestion and retrieval"
 readme = "README.md"
 license = "MIT"

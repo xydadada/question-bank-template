@@ -45,7 +45,10 @@ powershell -File .\mcp-public\setup-cloudflare.ps1 `
 ```
 
 `-CreateDnsRoute` 会修改该主机名的 Cloudflare DNS。省略它可先只生成本地配置并
-查看提示。脚本不公开 WeKnora 8080，只把公网主机名导向本机 OAuth 代理。
+查看提示。无论是否修改 DNS，脚本都可能打开浏览器完成 Cloudflare 登录、在
+`%USERPROFILE%\.cloudflared\cert.pem` 保存账户证书，并创建一个持久 Tunnel；如果
+同名 Tunnel 已存在则会明确提示复用。共享机器应使用唯一的 `-TunnelName` 并先确认
+其归属。脚本不公开 WeKnora 8080，只把公网主机名导向本机 OAuth 代理。
 
 ## 启动与本地确认
 

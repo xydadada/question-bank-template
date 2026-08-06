@@ -9,6 +9,12 @@ exports, source documents, generated Markdown, `state.db`, logs, or files under
 If a secret was committed, revoke it at the provider first. Rewriting Git
 history does not make a still-valid credential safe.
 
+Use a GitHub-provided noreply address for both author and committer metadata.
+The release audit rejects other reachable commit emails so a public merge does
+not silently expose a personal address. Also enable **Keep my email addresses
+private** and **Block command line pushes that expose my email** in your GitHub
+account email settings.
+
 ## Destructive processing
 
 All permanent-deletion options are disabled in the example configuration.

@@ -2,8 +2,21 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $Failures = [Collections.Generic.List[string]]::new()
 $Skip = @(".git", ".runtime", ".venv", "bin", "inbox", "archives", "work", "markdown", "failed", "outputs")
-$TextExtensions = @(".py", ".ps1", ".md", ".yaml", ".yml", ".json", ".cff", ".toml", ".txt", ".example", "")
-$SensitiveExtensions = @(".pem", ".key", ".p12", ".pfx", ".token", ".sqlite", ".sqlite3", ".db")
+$TextExtensions = @(
+    ".py", ".ps1", ".psm1", ".psd1", ".sh", ".cmd", ".bat", ".md", ".yaml",
+    ".yml", ".json", ".cff", ".toml", ".txt", ".example", ".ini", ".xml",
+    ".html", ".css", ".js", ".ts", ".csv", ""
+)
+$SensitiveExtensions = @(
+    ".pem", ".key", ".p12", ".pfx", ".token", ".sqlite", ".sqlite3", ".db",
+    ".crt", ".cer", ".der", ".kdbx", ".age", ".gpg"
+)
+$DisallowedArtifacts = @(
+    ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".mp3", ".mp4",
+    ".mkv", ".mov", ".avi", ".wav", ".webm", ".zip", ".7z", ".rar", ".tar",
+    ".gz", ".tgz", ".png", ".jpg", ".jpeg", ".gif", ".webp"
+)
+$AllowedActions = @("actions/checkout", "actions/setup-python", "astral-sh/setup-uv")
 
 $Forbidden = @(
     @{ Name = "absolute Windows user path"; Pattern = '(?i)[A-Z]:\\Users\\' },
@@ -23,6 +36,11 @@ function Test-PublishableText([string]$RelativePath, [string]$Text, [string]$Sou
     foreach ($Rule in $Forbidden) {
         if ($Text -match $Rule.Pattern) { $Failures.Add("$($Rule.Name) in ${Source}:$Normalized") }
     }
+}
+
+function Get-LeadingSpaceCount([string]$Line) {
+    $Match = [regex]::Match($Line, '^ *')
+    return $Match.Value.Length
 }
 
 if (Test-Path (Join-Path $Root ".git")) {
@@ -54,7 +72,7 @@ foreach ($File in $Files) {
 
 $Unexpected = $Files | Where-Object {
     $_.Name -match '^(state\.db|\.env)$' -or $_.Extension.ToLowerInvariant() -in
-        ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".mp4", ".mkv", ".7z", ".rar"
+        $DisallowedArtifacts
 }
 foreach ($File in $Unexpected) {
     $Failures.Add("private/generated artifact present: $($File.FullName.Substring($Root.Length + 1))")
@@ -76,9 +94,94 @@ foreach ($Script in $Files | Where-Object { $_.Extension -eq ".ps1" }) {
 
 foreach ($Workflow in $Files | Where-Object { $_.FullName -match '[\\/]\.github[\\/]workflows[\\/].+\.ya?ml$' }) {
     $WorkflowText = Get-Content -Raw -LiteralPath $Workflow.FullName
-    foreach ($Match in [regex]::Matches($WorkflowText, '(?m)^\s*uses:\s*\S+@([^\s#]+)')) {
-        if ($Match.Groups[1].Value -notmatch '^[0-9a-f]{40}$') {
-            $Failures.Add("mutable GitHub Action reference: $($Workflow.Name) -> $($Match.Groups[1].Value)")
+    $WorkflowLines = @($WorkflowText -split '\r?\n')
+    if ($WorkflowText -match '(?m)^\s*pull_request_target\s*:') {
+        $Failures.Add("dangerous pull_request_target trigger: $($Workflow.Name)")
+    }
+
+    $PermissionIndex = -1
+    for ($Index = 0; $Index -lt $WorkflowLines.Count; $Index++) {
+        if ($WorkflowLines[$Index] -match '^permissions:\s*(?:#.*)?$') {
+            $PermissionIndex = $Index
+            break
+        }
+    }
+    $PermissionEntries = @()
+    if ($PermissionIndex -ge 0) {
+        for ($Index = $PermissionIndex + 1; $Index -lt $WorkflowLines.Count; $Index++) {
+            $Line = $WorkflowLines[$Index]
+            if (-not $Line.Trim() -or $Line.TrimStart().StartsWith('#')) { continue }
+            if ((Get-LeadingSpaceCount $Line) -eq 0) { break }
+            $PermissionEntries += $Line.Trim()
+        }
+    }
+    if ($PermissionEntries.Count -ne 1 -or $PermissionEntries[0] -ne 'contents: read') {
+        $Failures.Add("workflow does not declare top-level contents: read: $($Workflow.Name)")
+    }
+
+    $CheckoutCount = 0
+    for ($Index = 0; $Index -lt $WorkflowLines.Count; $Index++) {
+        if ($WorkflowLines[$Index] -notmatch '^\s*uses:\s*actions/checkout@[0-9a-f]{40}\s*(?:#.*)?$') { continue }
+        $CheckoutCount++
+        $UsesIndent = Get-LeadingSpaceCount $WorkflowLines[$Index]
+        $StepStart = -1
+        for ($Back = $Index - 1; $Back -ge 0; $Back--) {
+            $Candidate = $WorkflowLines[$Back]
+            if ($Candidate.TrimStart().StartsWith('- ') -and (Get-LeadingSpaceCount $Candidate) -lt $UsesIndent) {
+                $StepStart = $Back
+                break
+            }
+        }
+        if ($StepStart -lt 0) {
+            $Failures.Add("checkout step could not be parsed: $($Workflow.Name)")
+            continue
+        }
+        $StepIndent = Get-LeadingSpaceCount $WorkflowLines[$StepStart]
+        $StepEnd = $WorkflowLines.Count
+        for ($Forward = $Index + 1; $Forward -lt $WorkflowLines.Count; $Forward++) {
+            $Candidate = $WorkflowLines[$Forward]
+            if (-not $Candidate.Trim() -or $Candidate.TrimStart().StartsWith('#')) { continue }
+            $Indent = Get-LeadingSpaceCount $Candidate
+            if ($Indent -lt $StepIndent -or ($Indent -eq $StepIndent -and $Candidate.TrimStart().StartsWith('- '))) {
+                $StepEnd = $Forward
+                break
+            }
+        }
+        $WithIndex = -1
+        for ($Forward = $Index + 1; $Forward -lt $StepEnd; $Forward++) {
+            if ($WorkflowLines[$Forward].Trim() -eq 'with:' -and
+                (Get-LeadingSpaceCount $WorkflowLines[$Forward]) -gt $StepIndent) {
+                $WithIndex = $Forward
+                break
+            }
+        }
+        $PersistDisabled = $false
+        if ($WithIndex -ge 0) {
+            $WithIndent = Get-LeadingSpaceCount $WorkflowLines[$WithIndex]
+            for ($Forward = $WithIndex + 1; $Forward -lt $StepEnd; $Forward++) {
+                $Candidate = $WorkflowLines[$Forward]
+                if (-not $Candidate.Trim() -or $Candidate.TrimStart().StartsWith('#')) { continue }
+                if ((Get-LeadingSpaceCount $Candidate) -le $WithIndent) { break }
+                if ($Candidate.Trim() -eq 'persist-credentials: false') { $PersistDisabled = $true }
+            }
+        }
+        if (-not $PersistDisabled) {
+            $Failures.Add("checkout credentials are not disabled inside the checkout step: $($Workflow.Name)")
+        }
+    }
+    if ($CheckoutCount -eq 0) { $Failures.Add("workflow has no approved checkout step: $($Workflow.Name)") }
+
+    foreach ($Match in [regex]::Matches($WorkflowText, '(?m)^\s*uses:\s*([^\s#]+)')) {
+        $Spec = $Match.Groups[1].Value
+        $Pinned = [regex]::Match($Spec, '^([^@]+)@([0-9a-f]{40})$')
+        if (-not $Pinned.Success) {
+            $Failures.Add("mutable or unsupported GitHub Action reference: $($Workflow.Name) -> $Spec")
+            continue
+        }
+        $Action = $Pinned.Groups[1].Value.ToLowerInvariant()
+        $Revision = $Pinned.Groups[2].Value
+        if ($Action -notin $AllowedActions) {
+            $Failures.Add("unapproved GitHub Action source: $($Workflow.Name) -> $Action")
         }
     }
 }
@@ -86,6 +189,12 @@ foreach ($Workflow in $Files | Where-Object { $_.FullName -match '[\\/]\.github[
 if (Test-Path (Join-Path $Root ".git")) {
     $Commits = @(& git -C $Root rev-list --all)
     foreach ($Commit in $Commits) {
+        $CommitEmails = ((& git -C $Root show -s --format='%ae%x09%ce' $Commit) -join "").Split("`t")
+        foreach ($CommitEmail in $CommitEmails) {
+            if ($CommitEmail -notmatch '^(?i)(?:noreply@github\.com|(?:[0-9]+\+)?[A-Z0-9_.\[\]-]+@users\.noreply\.github\.com)$') {
+                $Failures.Add("non-noreply commit email in reachable history $($Commit.Substring(0, 12))")
+            }
+        }
         $Paths = @(& git -C $Root ls-tree -r --name-only $Commit)
         foreach ($Path in $Paths) {
             $Normalized = $Path.Replace('\', '/')
@@ -94,6 +203,9 @@ if (Test-Path (Join-Path $Root ".git")) {
             if (($Name -match '^\.env(?:\.|$)' -and $Name -ne ".env.example") -or
                 $Extension -in $SensitiveExtensions -or $Name -match '\.secrets\.') {
                 $Failures.Add("sensitive path in reachable history $($Commit.Substring(0, 12)): $Normalized")
+            }
+            if ($Extension -in $DisallowedArtifacts) {
+                $Failures.Add("private/generated artifact in reachable history $($Commit.Substring(0, 12)): $Normalized")
             }
             if ($Extension -notin $TextExtensions) { continue }
             $Object = "${Commit}:$Path"
@@ -117,4 +229,4 @@ if ($Failures.Count) {
     $Failures | Sort-Object -Unique | ForEach-Object { Write-Error $_ }
     throw "Release audit failed with $($Failures.Count) finding(s)."
 }
-Write-Host "Release audit passed: publishable files and all reachable Git history contain no detected private data, live secrets, unsafe defaults, mutable Actions, or parse errors."
+Write-Host "Release audit passed: publishable files and all reachable Git history contain no detected private data, live secrets, personal commit emails, unsafe defaults, mutable Actions, or parse errors."

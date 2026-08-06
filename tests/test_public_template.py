@@ -1,6 +1,7 @@
 import ast
 import re
 import subprocess
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -123,6 +124,55 @@ class PublicTemplateTests(unittest.TestCase):
         audit = (ROOT / "scripts" / "release-audit.ps1").read_text("utf-8")
         self.assertIn('".json"', audit)
         self.assertIn("TunnelSecret", audit)
+
+    def test_citation_has_authors_and_matches_package_version(self) -> None:
+        citation = yaml.safe_load((ROOT / "CITATION.cff").read_text("utf-8"))
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))
+        self.assertEqual(citation["cff-version"], "1.2.0")
+        self.assertIsInstance(citation.get("authors"), list)
+        self.assertGreater(len(citation["authors"]), 0)
+        self.assertTrue(
+            all(isinstance(author, dict) and author for author in citation["authors"])
+        )
+        self.assertTrue(all(author.get("alias") for author in citation["authors"]))
+        self.assertEqual(citation["version"], project["project"]["version"])
+
+    def test_release_audit_checks_reachable_commit_emails(self) -> None:
+        audit = (ROOT / "scripts" / "release-audit.ps1").read_text("utf-8")
+        self.assertIn("rev-list --all", audit)
+        self.assertIn("%ae%x09%ce", audit)
+        self.assertIn("users\\.noreply\\.github\\.com", audit)
+        self.assertIn("non-noreply commit email", audit)
+
+    def test_release_audit_restricts_workflow_capabilities(self) -> None:
+        audit = (ROOT / "scripts" / "release-audit.ps1").read_text("utf-8")
+        self.assertIn("actions/checkout", audit)
+        self.assertIn("actions/setup-python", audit)
+        self.assertIn("astral-sh/setup-uv", audit)
+        self.assertIn("pull_request_target", audit)
+        self.assertIn("persist-credentials", audit)
+        self.assertIn("contents: read", audit)
+
+    def test_workflow_targets_main_pushes_and_pull_requests(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "audit.yml").read_text("utf-8")
+        self.assertRegex(workflow, r"(?m)^  push:\s*\n    branches: \[main\]$")
+        self.assertRegex(workflow, r"(?m)^  pull_request:\s*$")
+        self.assertIn("cancel-in-progress: true", workflow)
+        parsed = yaml.safe_load(workflow)
+        self.assertEqual(parsed["permissions"], {"contents": "read"})
+        steps = parsed["jobs"]["public-template-audit"]["steps"]
+        checkout = next(
+            step
+            for step in steps
+            if step.get("uses", "").startswith("actions/checkout@")
+        )
+        self.assertFalse(checkout["with"]["persist-credentials"])
+
+    def test_cloudflare_setup_points_to_complete_start_command(self) -> None:
+        setup = (ROOT / "mcp-public" / "setup-cloudflare.ps1").read_text("utf-8")
+        self.assertIn("if ($CreateDnsRoute)", setup)
+        self.assertIn("DNS was not changed", setup)
+        self.assertIn("mcp-public\\start-all.ps1 -ExternalUrl https://$Hostname", setup)
 
     def test_workflow_actions_are_immutable(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "audit.yml").read_text("utf-8")

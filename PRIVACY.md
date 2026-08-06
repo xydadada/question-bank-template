@@ -13,6 +13,11 @@ Data may be sent to services selected by the operator:
   connected ChatGPT workspace after OAuth authorization. Eight tools read or
   retrieve content; `chat` and `session_ask` create conversation records and
   should be disabled in the Workspace for strict retrieval-only use.
+- Cloudflare and ChatGPT may process connection details such as IP addresses,
+  request timing and MCP request metadata under their own terms. Local proxy,
+  tunnel and application logs may also contain operational context and must not
+  be published without review.
 
 Review provider terms and the sensitivity of documents before supplying keys.
-No telemetry is added by this template.
+The template adds no first-party analytics or telemetry of its own; this does
+not disable logging or metadata processing performed by selected providers.

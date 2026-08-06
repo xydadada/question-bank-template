@@ -37,6 +37,12 @@ state.db*
 *.pfx
 *.token
 *.secrets.*
+*.crt
+*.cer
+*.der
+*.kdbx
+*.age
+*.gpg
 
 # Downloaded/build runtime
 .runtime/

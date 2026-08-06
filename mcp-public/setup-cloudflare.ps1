@@ -31,6 +31,7 @@ if (-not $Tunnel) {
     $TunnelId = $Matches[0]
 } else {
     $TunnelId = [string]$Tunnel.id
+    Write-Warning "Reusing existing Cloudflare Tunnel '$TunnelName' ($TunnelId). Confirm that it belongs to this deployment."
 }
 
 $Credentials = Join-Path $env:USERPROFILE ".cloudflared\$TunnelId.json"
@@ -56,4 +57,5 @@ ingress:
   - service: http_status:404
 "@
 [IO.File]::WriteAllText((Join-Path $ConfigDir "config.yml"), $Config, [Text.UTF8Encoding]::new($false))
-Write-Host "Cloudflare Tunnel config created locally. Start it with mcp-public/start-cloudflare.ps1."
+Write-Host "Cloudflare Tunnel config created locally. Start the complete MCP path with:"
+Write-Host "powershell -File .\mcp-public\start-all.ps1 -ExternalUrl https://$Hostname"

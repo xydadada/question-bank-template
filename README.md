@@ -36,6 +36,8 @@ inbox 中的文件或压缩包
   严格检索模式必须在 ChatGPT Workspace 中禁用这两项。
 
 先用可丢弃的小样本确认流程。永久删除无法撤销。
+首次完整运行请按 [最小冒烟确认](docs/SMOKE_TEST.md) 逐项执行；该确认需要下载者
+自己的服务账号和密钥，因此仓库 CI 不会假装完成真实云端端到端调用。
 
 ## 前置条件
 
@@ -159,7 +161,7 @@ powershell -File .\scripts\release-audit.ps1
 uv run python -m unittest discover -s tests -v
 ```
 
-`.github/workflows/audit.yml` 会在 push 和 pull request 时自动运行相同检查；
+`.github/workflows/audit.yml` 会在 pull request 和推送到 `main` 时自动运行相同检查；
 所有 Action 都固定到不可变提交。
 
 代码采用 [MIT License](LICENSE)。第三方组件保留各自许可证。

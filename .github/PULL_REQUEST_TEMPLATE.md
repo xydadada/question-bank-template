@@ -10,3 +10,4 @@ Describe the focused change and why it is needed.
       local configuration, database files, OAuth data or unredacted logs.
 - [ ] Destructive defaults remain disabled.
 - [ ] GitHub Actions remain pinned to full commit SHAs.
+- [ ] My reachable commit author and committer addresses use GitHub noreply.
