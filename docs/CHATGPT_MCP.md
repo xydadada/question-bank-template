@@ -47,8 +47,18 @@ powershell -File .\mcp-public\setup-cloudflare.ps1 `
 `-CreateDnsRoute` 会修改该主机名的 Cloudflare DNS。省略它可先只生成本地配置并
 查看提示。无论是否修改 DNS，脚本都可能打开浏览器完成 Cloudflare 登录、在
 `%USERPROFILE%\.cloudflared\cert.pem` 保存账户证书，并创建一个持久 Tunnel；如果
-同名 Tunnel 已存在则会明确提示复用。共享机器应使用唯一的 `-TunnelName` 并先确认
-其归属。脚本不公开 WeKnora 8080，只把公网主机名导向本机 OAuth 代理。
+同名 Tunnel 已存在，脚本会停止；确认归属后必须显式增加 `-ReuseExistingTunnel`
+才能复用。脚本会把 `.cloudflared` 凭据目录收紧为当前用户和 SYSTEM 可访问。共享
+机器仍应使用唯一的 `-TunnelName`。脚本不公开 WeKnora 8080，只把公网主机名导向
+本机 OAuth 代理。
+
+## 可选 Compose Profile 的端口
+
+模板默认只启动 WeKnora 核心服务，并把 8080/8088 绑定到 `127.0.0.1`。不要在未
+检查上游 `docker-compose.yml` 的情况下直接启用 Neo4j、MinIO、Qdrant、Milvus、
+Weaviate、Doris、Dex、Langfuse 或 Python MCP 等可选 Profile：其中部分 Profile
+会把额外端口绑定到所有网卡。需要启用时，应先在本地 Compose override 中把每个
+宿主端口显式绑定到 `127.0.0.1`，并更换所有默认密码。
 
 ## 启动与本地确认
 

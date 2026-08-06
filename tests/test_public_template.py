@@ -2,11 +2,14 @@ import ast
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
 
 import yaml
+from PIL import Image
+from pypdf import PdfWriter
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -172,6 +175,77 @@ class PublicTemplateTests(unittest.TestCase):
         self.assertIn("GetByteCount($FirstPlain) -gt 72", script)
         self.assertIn("[Array]::Clear($PasswordBytes", script)
 
+    def test_readonly_profile_clears_api_key_and_stops_failed_child(self) -> None:
+        script = (ROOT / "mcp-public" / "configure-readonly-profile.ps1").read_text(
+            "utf-8"
+        )
+        self.assertIn("[Array]::Clear($KeyBytes", script)
+        self.assertIn("$Process.Kill()", script)
+
+    def test_cloudflare_credentials_and_tunnel_reuse_are_explicit(self) -> None:
+        script = (ROOT / "mcp-public" / "setup-cloudflare.ps1").read_text(
+            "utf-8"
+        )
+        self.assertIn("Protect-CloudflareCredentialPath", script)
+        self.assertIn("/inheritance:r", script)
+        self.assertIn("/remove:g", script)
+        self.assertIn("Cloudflare credential ACL verification failed", script)
+        self.assertIn("[switch]$ReuseExistingTunnel", script)
+        self.assertIn("rerun with -ReuseExistingTunnel", script)
+
+    def test_permissive_pdf_dependencies_replace_pymupdf(self) -> None:
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))
+        dependencies = "\n".join(project["project"]["dependencies"]).casefold()
+        self.assertNotIn("pymupdf", dependencies)
+        self.assertIn("pypdfium2", dependencies)
+        self.assertIn("pillow", dependencies)
+        source = (ROOT / "ingest.py").read_text("utf-8")
+        self.assertNotIn("import fitz", source)
+
+    def test_pdf_render_crop_and_image_resize(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            pdf = work / "sample.pdf"
+            writer = PdfWriter()
+            writer.add_blank_page(width=612, height=792)
+            with pdf.open("wb") as output:
+                writer.write(output)
+            full = ingest.render_pdf_page(pdf, 0, work / "full.png", 120)
+            crop = ingest.render_pdf_page(
+                pdf, 0, work / "crop.png", 120, [100, 100, 500, 500]
+            )
+            with Image.open(full) as full_image, Image.open(crop) as crop_image:
+                self.assertLess(crop_image.width, full_image.width)
+                self.assertLess(crop_image.height, full_image.height)
+            large = work / "large.png"
+            Image.new("RGB", (2400, 1200), "white").save(large)
+            resized, changed = ingest.prepare_model_image(large, work, 1600)
+            self.assertTrue(changed)
+            with Image.open(resized) as resized_image:
+                self.assertEqual(max(resized_image.size), 1600)
+
+    def test_doctor_allows_retrieval_without_build_tools_or_provider_keys(self) -> None:
+        script = (ROOT / "scripts" / "doctor.ps1").read_text("utf-8")
+        self.assertIn("existing knowledge-base retrieval can still work", script)
+        self.assertIn("existing WeKnora CLI can run", script)
+
+    def test_mimo_documentation_matches_safe_example_limits(self) -> None:
+        config = yaml.safe_load((ROOT / "config.example.yaml").read_text("utf-8"))
+        mimo = config["ollama"]["mimo"]
+        self.assertEqual(mimo["parallel_per_key"], 2)
+        self.assertEqual(mimo["parallel_cap"], 8)
+        text = (ROOT / "config.example.yaml").read_text("utf-8")
+        self.assertIn("有效Key数×2", text)
+        self.assertIn("总上限为8", text)
+
+    def test_optional_compose_profiles_have_network_warning(self) -> None:
+        guide = (ROOT / "docs" / "CHATGPT_MCP.md").read_text("utf-8")
+        self.assertIn("可选 Compose Profile 的端口", guide)
+        self.assertIn("127.0.0.1", guide)
+        self.assertIn("默认密码", guide)
+
     def test_example_env_has_no_inert_mcp_settings(self) -> None:
         example = (ROOT / ".env.example").read_text("utf-8")
         self.assertNotIn("MCP_EXTERNAL_URL", example)
@@ -182,6 +256,7 @@ class PublicTemplateTests(unittest.TestCase):
         audit = (ROOT / "scripts" / "release-audit.ps1").read_text("utf-8")
         self.assertIn('".json"', audit)
         self.assertIn("TunnelSecret", audit)
+        self.assertIn("AGPL PyMuPDF dependency", audit)
 
     def test_citation_has_authors_and_matches_package_version(self) -> None:
         citation = yaml.safe_load((ROOT / "CITATION.cff").read_text("utf-8"))

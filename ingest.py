@@ -28,10 +28,11 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote
 
-import fitz
+import pypdfium2 as pdfium
 import requests
 import yaml
 from dotenv import dotenv_values, load_dotenv
+from PIL import Image
 from pypdf import PdfReader, PdfWriter
 from requests.adapters import HTTPAdapter
 
@@ -2741,43 +2742,60 @@ def image_entries(result_dir: Path) -> dict[str, dict | None]:
 def render_pdf_page(
     pdf: Path, page_index: int, output: Path, dpi: int, bbox: list[float] | None = None
 ) -> Path:
-    doc = fitz.open(pdf)
+    document = pdfium.PdfDocument(str(pdf))
     try:
-        pages = len(doc)
+        pages = len(document)
         if not 0 <= page_index < pages:
             raise RuntimeError(
                 f"MinerU图片页码超出分卷范围: page_idx={page_index}, pages={pages}"
             )
-        page = doc[page_index]
-        clip = None
-        if bbox and len(bbox) == 4:
-            x0, y0, x1, y1 = map(float, bbox)
-            if max(bbox) <= 1.5:
-                x0, x1 = x0 * page.rect.width, x1 * page.rect.width
-                y0, y1 = y0 * page.rect.height, y1 * page.rect.height
-            elif max(bbox) <= 1000.5:
-                x0, x1 = x0 * page.rect.width / 1000, x1 * page.rect.width / 1000
-                y0, y1 = y0 * page.rect.height / 1000, y1 * page.rect.height / 1000
-            else:
-                raise RuntimeError(f"无法识别MinerU图片坐标范围: {bbox}")
-            candidate = fitz.Rect(x0, y0, x1, y1)
-            if (
-                candidate.width > 1
-                and candidate.height > 1
-                and candidate.x0 >= 0
-                and candidate.y0 >= 0
-                and candidate.x1 <= page.rect.width * 1.25
-                and candidate.y1 <= page.rect.height * 1.25
-            ):
-                clip = (candidate + (-8, -8, 8, 8)) & page.rect
-            else:
-                raise RuntimeError(f"MinerU图片坐标无效: {bbox}")
-        pix = page.get_pixmap(
-            matrix=fitz.Matrix(dpi / 72, dpi / 72), alpha=False, clip=clip
-        )
-        pix.save(output)
+        page = document[page_index]
+        try:
+            page_width, page_height = page.get_size()
+            scale = max(1, dpi) / 72
+            bitmap = page.render(scale=scale)
+            try:
+                rendered = bitmap.to_pil().copy()
+            finally:
+                bitmap.close()
+        finally:
+            page.close()
+        try:
+            if bbox and len(bbox) == 4:
+                x0, y0, x1, y1 = map(float, bbox)
+                if max(bbox) <= 1.5:
+                    x0, x1 = x0 * page_width, x1 * page_width
+                    y0, y1 = y0 * page_height, y1 * page_height
+                elif max(bbox) <= 1000.5:
+                    x0, x1 = x0 * page_width / 1000, x1 * page_width / 1000
+                    y0, y1 = y0 * page_height / 1000, y1 * page_height / 1000
+                else:
+                    raise RuntimeError(f"无法识别MinerU图片坐标范围: {bbox}")
+                if not (
+                    x1 - x0 > 1
+                    and y1 - y0 > 1
+                    and x0 >= 0
+                    and y0 >= 0
+                    and x1 <= page_width * 1.25
+                    and y1 <= page_height * 1.25
+                ):
+                    raise RuntimeError(f"MinerU图片坐标无效: {bbox}")
+                padding = 8
+                left = max(0, round((x0 - padding) * scale))
+                top = max(0, round((y0 - padding) * scale))
+                right = min(rendered.width, round((x1 + padding) * scale))
+                bottom = min(rendered.height, round((y1 + padding) * scale))
+                if right - left <= 1 or bottom - top <= 1:
+                    raise RuntimeError(f"MinerU图片坐标裁剪后为空: {bbox}")
+                cropped = rendered.crop((left, top, right, bottom))
+                rendered.close()
+                rendered = cropped
+            output.parent.mkdir(parents=True, exist_ok=True)
+            rendered.save(output)
+        finally:
+            rendered.close()
     finally:
-        doc.close()
+        document.close()
     return output
 
 
@@ -2785,25 +2803,27 @@ def prepare_model_image(image: Path, job: Path, max_side: int) -> tuple[Path, bo
     """限制OCR和视觉模型输入尺寸，避免超大图片浪费CPU、显存和时间。"""
     if max_side <= 0:
         return image, False
-    document = fitz.open(image)
-    try:
-        page = document[0]
-        longest = max(page.rect.width, page.rect.height)
+    with Image.open(image) as source_image:
+        longest = max(source_image.size)
         if longest <= max_side:
             return image, False
-        scale = max_side / longest
-        pixmap = page.get_pixmap(
-            matrix=fitz.Matrix(scale, scale), alpha=False
-        )
+        resized = source_image.copy()
+        resized.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        if resized.mode != "RGB":
+            converted = resized.convert("RGB")
+            resized.close()
+            resized = converted
         output = job / (
             "model-"
             + hashlib.sha256(str(image).encode("utf-8")).hexdigest()[:12]
             + ".jpg"
         )
-        pixmap.save(output)
-        return output, True
-    finally:
-        document.close()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            resized.save(output, format="JPEG", quality=90)
+        finally:
+            resized.close()
+    return output, True
 
 
 def recover_non_pdf_image(
@@ -6782,8 +6802,7 @@ def process(
     if not metrics["started_at"]:
         metrics["started_at"] = int(time.time())
     if not metrics["source_pages"] and source.suffix.lower() == ".pdf":
-        with fitz.open(source) as document:
-            metrics["source_pages"] = len(document)
+        metrics["source_pages"] = len(PdfReader(str(source)).pages)
     try:
         if row and row["state"] == "completed":
             if not doc_id or not final.is_file():
