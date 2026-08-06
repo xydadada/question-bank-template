@@ -39,6 +39,9 @@ jobs:
       - name: Run unit tests
         run: uv run python -m unittest discover -s tests -v
 
+      - name: Verify documented CLI entry point
+        run: uv run python ingest.py --help
+
       - name: Run public release audit
         shell: pwsh
         run: ./scripts/release-audit.ps1
