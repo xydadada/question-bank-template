@@ -98,9 +98,9 @@ ollama:
     classification_max_key_attempts: 1
     max_key_attempts: 3
     max_completion_tokens: 256
-    # 每个Key最多允许4个独立请求同时在途：前一张尚未回答时即可发送下一张。
-    # 理论并发按“有效Key数×4”计算，但总上限固定为32；
-    # 从已验证稳定的28路起步，弹性上限开放到32。
+    # 每个Key默认最多允许2个独立请求同时在途：前一张尚未回答时即可发送下一张。
+    # 自动并发按“有效Key数×2”计算，但安全默认总上限为8；
+    # 下载者确认自己的账号限额和内存余量后，可在本地配置中提高这两个值。
     # 遇到429、超时或低内存时仍会自动收缩，不强制占满。
     initial_parallel: 2
     max_parallel: auto

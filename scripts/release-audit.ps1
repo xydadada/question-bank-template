@@ -83,6 +83,11 @@ foreach ($Unsafe in "delete_videos: true", "delete_archives_after_extract: true"
     if ($Config.Contains($Unsafe)) { $Failures.Add("unsafe example default: $Unsafe") }
 }
 
+$Project = Get-Content -Raw (Join-Path $Root "pyproject.toml")
+if ($Project -match '(?im)^\s*"pymupdf(?:\[[^]]+])?\s*[<>=!~]') {
+    $Failures.Add("AGPL PyMuPDF dependency is not permitted in the MIT template")
+}
+
 foreach ($Script in $Files | Where-Object { $_.Extension -eq ".ps1" }) {
     $Tokens = $null
     $ParseErrors = $null

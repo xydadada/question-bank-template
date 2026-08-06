@@ -6,8 +6,17 @@ function Check([bool]$Condition, [string]$Ok, [string]$Failure) {
     if ($Condition) { Write-Host "[OK] $Ok" } else { Write-Host "[FAIL] $Failure"; $Failures.Add($Failure) }
 }
 
-foreach ($Name in "git", "go", "uv", "wsl.exe") {
+foreach ($Name in "git", "uv", "wsl.exe") {
     Check ([bool](Get-Command $Name -ErrorAction SilentlyContinue)) "$Name available" "$Name missing"
+}
+$Cli = Join-Path $Root "bin\weknora.exe"
+$HasGo = [bool](Get-Command "go" -ErrorAction SilentlyContinue)
+if ($HasGo) {
+    Write-Host "[OK] go available"
+} elseif (Test-Path $Cli) {
+    Write-Host "[WARN] go missing; the existing WeKnora CLI can run, but bootstrap cannot rebuild it"
+} else {
+    $Failures.Add("go missing and WeKnora CLI has not been built; run bootstrap after installing Go")
 }
 Check (Test-Path (Join-Path $Root ".env")) ".env exists" ".env missing; run bootstrap"
 $Config = Join-Path $Root "config.local.yaml"
@@ -25,7 +34,6 @@ if (Test-Path $Python) {
     $Failures.Add("Python environment missing; run bootstrap")
 }
 
-$Cli = Join-Path $Root "bin\weknora.exe"
 if (Test-Path $Cli) {
     $RuntimeProfile = "local"
     if (Test-Path $Config) {
@@ -41,7 +49,7 @@ if (Test-Path $Cli) {
 $EnvText = if (Test-Path (Join-Path $Root ".env")) { Get-Content -Raw (Join-Path $Root ".env") } else { "" }
 $HasMineru = $EnvText -match '(?m)^MINERU_API_TOKEN(?:_[A-Z0-9]+)?\s*=\s*[^\s#]+\s*$'
 $HasMimo = $EnvText -match '(?m)^MIMO_API_KEY(?:_[0-9]+)?\s*=\s*[^\s#]+\s*$'
-Check ([bool]$HasMineru) "at least one MinerU key is present (value hidden)" "no MinerU key detected"
+if ($HasMineru) { Write-Host "[OK] at least one MinerU key is present (value hidden)" } else { Write-Host "[WARN] no MinerU key detected; ingestion is unavailable, but existing knowledge-base retrieval can still work" }
 if ($HasMimo) { Write-Host "[OK] at least one MiMo key is present (value hidden)" } else { Write-Host "[WARN] no MiMo key detected; image understanding will be unavailable" }
 
 if ($Failures.Count) {

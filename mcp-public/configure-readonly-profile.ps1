@@ -26,6 +26,8 @@ if (-not $Existing) {
 Write-Host "Create a dedicated least-privilege API key in WeKnora first. It should only read the knowledge bases you intend to expose."
 $SecureKey = Read-Host "Paste that API key (input hidden)" -AsSecureString
 $KeyPtr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureKey)
+$KeyBytes = $null
+$Process = $null
 try {
     $PlainKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($KeyPtr)
     if ([string]::IsNullOrWhiteSpace($PlainKey)) { throw "API key cannot be empty." }
@@ -46,11 +48,18 @@ try {
     $null = $Process.StandardOutput.ReadToEnd()
     $null = $Process.StandardError.ReadToEnd()
     $Process.WaitForExit()
-    [Array]::Clear($KeyBytes, 0, $KeyBytes.Length)
     if ($Process.ExitCode -ne 0) { throw "WeKnora rejected the API key. No key value was logged." }
 } finally {
+    if ($KeyBytes) {
+        [Array]::Clear($KeyBytes, 0, $KeyBytes.Length)
+    }
+    if ($Process -and -not $Process.HasExited) {
+        try { $Process.StandardInput.Close() } catch { }
+        try { $Process.Kill() } catch { }
+    }
     if ($KeyPtr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($KeyPtr) }
     $PlainKey = $null
+    $SecureKey = $null
 }
 
 & $Cli --profile $Profile kb list --format json | Out-Null
