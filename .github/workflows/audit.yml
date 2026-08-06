@@ -1,0 +1,39 @@
+name: audit
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  public-template-audit:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
+        with:
+          enable-cache: true
+
+      - name: Sync locked dependencies
+        run: uv sync --locked
+
+      - name: Run unit tests
+        run: uv run python -m unittest discover -s tests -v
+
+      - name: Run public release audit
+        shell: pwsh
+        run: ./scripts/release-audit.ps1

@@ -1,6 +1,6 @@
 [project]
 name = "question-bank-ingest"
-version = "0.1.0"
+version = "0.1.1"
 description = "A privacy-safe Windows and WSL template for MinerU-to-WeKnora question-bank ingestion and retrieval"
 readme = "README.md"
 license = "MIT"
@@ -15,13 +15,17 @@ classifiers = [
 ]
 dependencies = [
   "bcrypt>=4.2",
-  "onnxruntime>=1.23",
-  "rapidocr>=3.9",
   "pymupdf>=1.26",
   "pypdf>=5.0",
   "python-dotenv>=1.0",
   "pyyaml>=6.0",
   "requests>=2.32",
+]
+
+[project.optional-dependencies]
+ocr = [
+  "onnxruntime>=1.23",
+  "rapidocr>=3.9",
 ]
 
 [project.urls]

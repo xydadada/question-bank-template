@@ -44,6 +44,9 @@ if ($CreateDnsRoute) {
 
 $ConfigDir = Join-Path $Base "cloudflare"
 New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
+$Sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+& "$env:WINDIR\System32\icacls.exe" $ConfigDir /inheritance:r /grant:r "*${Sid}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Could not restrict Cloudflare configuration ACLs." }
 $Config = @"
 tunnel: $TunnelId
 credentials-file: $($Credentials.Replace('\', '/'))

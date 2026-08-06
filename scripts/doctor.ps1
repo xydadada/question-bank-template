@@ -27,17 +27,20 @@ if (Test-Path $Python) {
 
 $Cli = Join-Path $Root "bin\weknora.exe"
 if (Test-Path $Cli) {
-    & $Cli doctor --format json --profile local
+    $RuntimeProfile = "local"
+    if (Test-Path $Config) {
+        $ProfileMatch = [regex]::Match((Get-Content -Raw -LiteralPath $Config), '(?m)^  profile:\s*["'']?([^\s#"'']+)')
+        if ($ProfileMatch.Success) { $RuntimeProfile = $ProfileMatch.Groups[1].Value }
+    }
+    & $Cli doctor --format json --profile $RuntimeProfile
     Check ($LASTEXITCODE -eq 0) "WeKnora CLI doctor passed" "WeKnora CLI doctor failed"
 } else {
     $Failures.Add("WeKnora CLI missing; run bootstrap")
 }
 
-$MineruNames = "MINERU_API_TOKEN", "MINERU_API_TOKEN_BACKUP"
-$MimoNames = "MIMO_API_KEY", "MIMO_API_KEY_2"
 $EnvText = if (Test-Path (Join-Path $Root ".env")) { Get-Content -Raw (Join-Path $Root ".env") } else { "" }
-$HasMineru = $MineruNames | Where-Object { $EnvText -match "(?m)^$($_)=.+$" }
-$HasMimo = $MimoNames | Where-Object { $EnvText -match "(?m)^$($_)=.+$" }
+$HasMineru = $EnvText -match '(?m)^MINERU_API_TOKEN(?:_[A-Z0-9]+)?\s*=\s*[^\s#]+\s*$'
+$HasMimo = $EnvText -match '(?m)^MIMO_API_KEY(?:_[0-9]+)?\s*=\s*[^\s#]+\s*$'
 Check ([bool]$HasMineru) "at least one MinerU key is present (value hidden)" "no MinerU key detected"
 if ($HasMimo) { Write-Host "[OK] at least one MiMo key is present (value hidden)" } else { Write-Host "[WARN] no MiMo key detected; image understanding will be unavailable" }
 

@@ -1,6 +1,11 @@
 [CmdletBinding()]
-param([Parameter(Mandatory = $true)][string]$ExternalUrl)
+param(
+    [string]$ExternalUrl,
+    [string]$WslDistro = "Ubuntu"
+)
 
-& (Join-Path $PSScriptRoot "start.ps1") -ExternalUrl $ExternalUrl
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& (Join-Path $PSScriptRoot "start-cloudflare.ps1")
+$ErrorActionPreference = "Stop"
+$Root = Split-Path -Parent $PSScriptRoot
+$StartArguments = @{ WslDistro = $WslDistro; Mcp = $true }
+if ($ExternalUrl) { $StartArguments.McpExternalUrl = $ExternalUrl }
+& (Join-Path $Root "scripts\start.ps1") @StartArguments

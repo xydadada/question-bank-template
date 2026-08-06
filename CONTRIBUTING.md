@@ -14,6 +14,6 @@ Changes that enable destructive behavior by default, add telemetry, expose a
 write-capable MCP surface, or bypass upstream authentication will not be
 accepted.
 
-Maintainers can enable the checked-in workflow example by copying
-`docs/audit.workflow.example.yml` to `.github/workflows/audit.yml` with a
-GitHub credential that has workflow-write permission.
+The checked-in `.github/workflows/audit.yml` runs the same checks for every
+push and pull request. Action references must remain pinned to full immutable
+commit SHAs; Dependabot can propose reviewed updates.

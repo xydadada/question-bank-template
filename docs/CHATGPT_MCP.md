@@ -1,4 +1,4 @@
-# ChatGPT Workspace 只读 MCP
+# ChatGPT Workspace 受限检索 MCP
 
 架构：
 
@@ -11,7 +11,10 @@ ChatGPT Workspace
 ```
 
 模板没有自定义 MCP Server、过滤代理或写操作适配器。后端是官方 CLI 提供的
-curated read-only MCP surface。
+固定 10 工具面：`kb_list`、`kb_view`、`doc_list`、`doc_view`、`doc_download`、
+`search_chunks`、`chunk_list`、`agent_list` 是读取/检索工具；`chat` 与
+`session_ask` 会创建会话或消息记录。它不暴露建库、上传、修改或删除文档的工具，
+但不能把全部 10 项统称为“零写入”。
 
 ## 准备
 
@@ -21,6 +24,18 @@ curated read-only MCP surface。
    `mcp-auth-proxy v2.10.2` 的 SHA-256，并验证 cloudflared 的 Authenticode 签名。
 4. 运行 `mcp-public/set-password.ps1`。仓库只保存 bcrypt 哈希到忽略目录，
    不保存明文密码。
+5. 在 WeKnora 中创建独立、最小权限的 API Key：只选择 `retrieve` 能力，只勾选
+   准备公开给 ChatGPT 的知识库；不要授予 `ingest`、`manage_kbs` 或其他管理能力。
+   随后运行：
+
+```powershell
+powershell -File .\mcp-public\configure-readonly-profile.ps1
+```
+
+Key 交给官方 CLI 的凭据机制，不写入仓库、参数、脚本或日志。CLI 会优先使用操作
+系统 Keyring；不可用时按其官方行为回退到当前用户配置目录中的权限受限文件。不要
+复制该目录，也不要复用建库、入库或管理员 Profile；`kb_list` 和 `doc_download`
+能够读取这个 Key 范围内的全部内容。
 
 ## 创建 Tunnel
 
@@ -47,7 +62,8 @@ Business/Enterprise Workspace 中创建自定义应用：
 - 服务器 URL：`https://mcp.your-domain.example/mcp`
 - 身份验证：OAuth
 - 完成 OAuth 登录并启用实时访问或索引搜索
-- 审查工具列表，确认没有 create/delete/update/upload 等写工具
+- 审查工具列表，确认没有 create/delete/update/upload 等知识库写工具
+- 严格检索模式下，由 Workspace 管理员禁用 `chat` 和 `session_ask`
 - 先保存为草稿，真实检索成功后再按 Workspace 范围发布
 
 账号邮箱相同不代表 Workspace 配置共享。应用必须安装到实际使用它的 Workspace。
@@ -55,6 +71,11 @@ Business/Enterprise Workspace 中创建自定义应用：
 ## 停止
 
 ```powershell
+# 停止由 start-all.ps1 启动的公网层、WeKnora 和本次手动 WSL 保活。
+# 脚本会自动读取启动时记录的 WSL 发行版。
+powershell -File .\scripts\stop.ps1 -StopWeKnora
+
+# 若只想断开 ChatGPT 公网连接、保留本地 WeKnora，则仅运行：
 powershell -File .\mcp-public\stop.ps1
 ```
 
