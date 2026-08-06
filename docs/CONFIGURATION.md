@@ -19,7 +19,10 @@
 - `raw`：最终合并 Markdown 原文。
 
 三个层级同时使用 WeKnora 的向量与 BM25 混合检索。`layer_weights` 和
-`document_type_weights` 可调；修改后无需改 Python 源码。
+`document_type_weights` 可调，但它们只影响 `ingest.py --search` 的本地三层
+聚合与排序，不会改写官方 WeKnora MCP 的服务端排序。ChatGPT 侧仍会看到三层
+知识库，并根据工具描述、查询词和返回结果决定继续搜索哪一层。修改本地权重无需
+改 Python 源码。
 
 `chunk_sizes` 为 `0` 时接受用户在 WeKnora 中配置的分块大小。填正整数时，启动
 预检会要求服务器配置完全匹配。

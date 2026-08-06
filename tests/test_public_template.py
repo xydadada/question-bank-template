@@ -6,6 +6,7 @@ import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 from PIL import Image
@@ -161,6 +162,14 @@ class PublicTemplateTests(unittest.TestCase):
         root_start = (ROOT / "scripts" / "start.ps1").read_text("utf-8")
         self.assertIn("mcp_public.external_url", root_start)
         self.assertIn("-Profile $McpProfile", root_start)
+        self.assertIn('"doctor", "--no-cache"', start)
+        self.assertIn('"search", "chunks"', start)
+        self.assertIn("real hybrid search", start)
+        self.assertIn("ExpectedKnowledgeBaseIds", start)
+        self.assertIn("cannot see every configured question-bank layer", start)
+        proxy_start = start.index("Start-Process -FilePath $Proxy")
+        self.assertLess(start.index('"doctor", "--no-cache"'), proxy_start)
+        self.assertLess(start.index('"search", "chunks"'), proxy_start)
         tunnel_start = (ROOT / "mcp-public" / "start-cloudflare.ps1").read_text(
             "utf-8"
         )
@@ -225,6 +234,109 @@ class PublicTemplateTests(unittest.TestCase):
             self.assertTrue(changed)
             with Image.open(resized) as resized_image:
                 self.assertEqual(max(resized_image.size), 1600)
+
+    def test_embedding_probe_is_cached_only_inside_one_process(self) -> None:
+        import sqlite3
+
+        import ingest
+
+        config = {
+            "weknora": {
+                "upload_command": ["weknora"],
+                "parent_knowledge_base": "parent-kb",
+                "child_knowledge_base": "child-kb",
+                "raw_knowledge_base": "raw-kb",
+                "profile": "local",
+                "setup_profile": "local",
+                "chunk_sizes": {},
+                "models": {
+                    "provider": "ollama",
+                    "embedding": "qwen3-embedding:0.6b",
+                    "embedding_dimension": 1024,
+                },
+            }
+        }
+        real_probe_calls = 0
+
+        def fake_run_command(template, values, cwd, **kwargs):
+            nonlocal real_probe_calls
+            if "/api/v1/initialization/embedding/test" in template:
+                real_probe_calls += 1
+                return {"data": {"data": {"available": True, "dimension": 1024}}}
+            self.assertIn("kb", template)
+            self.assertIn("view", template)
+            return {
+                "data": {
+                    "embedding_model_id": "embedding-model-id",
+                    "chunking_config": {},
+                }
+            }
+
+        database = sqlite3.connect(":memory:")
+        database.execute(
+            "CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT)"
+        )
+        ingest.EMBEDDING_VERIFIED_THIS_PROCESS.clear()
+        ingest.EMBEDDING_WARMED_THIS_PROCESS.clear()
+        self.addCleanup(ingest.EMBEDDING_VERIFIED_THIS_PROCESS.clear)
+        self.addCleanup(ingest.EMBEDDING_WARMED_THIS_PROCESS.clear)
+        with mock.patch.object(ingest, "run_command", side_effect=fake_run_command):
+            ingest.verify_embedding_model(config, database)
+            ingest.verify_embedding_model(config, database)
+            self.assertEqual(real_probe_calls, 1)
+            # Simulate a fresh process: the persisted DB fingerprint must not
+            # suppress a new real call after Ollama or Docker may have changed.
+            ingest.EMBEDDING_VERIFIED_THIS_PROCESS.clear()
+            ingest.verify_embedding_model(config, database)
+        self.assertEqual(real_probe_calls, 2)
+        database.close()
+
+    def test_preflight_does_not_trust_persisted_embedding_health(self) -> None:
+        source = (ROOT / "ingest.py").read_text("utf-8")
+        self.assertNotIn("Embedding配置已有验证指纹，跳过日常重复预热", source)
+        preflight = source[source.index("def preflight(") : source.index("def clean_job(")]
+        self.assertLess(
+            preflight.index("verify_embedding_model(cfg, db)"),
+            preflight.index('"kb", "status"'),
+        )
+        self.assertIn("知识库尚未达到可检索状态", preflight)
+        self.assertIn('(\"原文\", wc[\"raw_knowledge_base\"])', preflight)
+
+    def test_embedding_warmup_is_cached_only_inside_one_process(self) -> None:
+        import ingest
+
+        config = {
+            "ollama": {"base_url": "http://127.0.0.1:11434"},
+            "weknora": {
+                "models": {
+                    "embedding": "qwen3-embedding:0.6b",
+                    "embedding_dimension": 4,
+                }
+            },
+        }
+        response = mock.Mock()
+        response.json.return_value = {"embeddings": [[0.0, 0.0, 0.0, 0.0]]}
+        ingest.EMBEDDING_WARMED_THIS_PROCESS.clear()
+        self.addCleanup(ingest.EMBEDDING_WARMED_THIS_PROCESS.clear)
+        with (
+            mock.patch.object(ingest, "windows_memory_gb", return_value=(16, 8)),
+            mock.patch.object(ingest.requests, "post", return_value=response) as post,
+        ):
+            ingest.warm_embedding_model(config)
+            ingest.warm_embedding_model(config)
+        self.assertEqual(post.call_count, 1)
+        response.raise_for_status.assert_called_once_with()
+
+    def test_weknora_configuration_is_rerunnable_without_stale_ids(self) -> None:
+        script = (ROOT / "scripts" / "configure-weknora.ps1").read_text(
+            "utf-8"
+        )
+        self.assertIn("Set-YamlScalar", script)
+        self.assertIn('"model", "view"', script)
+        self.assertIn("embedding_parameters.dimension", script)
+        self.assertIn("embedding_model_id", script)
+        self.assertIn("ExistingProfile.host", script)
+        self.assertNotIn('.Replace(\'"__PARENT_KB_ID__"\'', script)
 
     def test_doctor_allows_retrieval_without_build_tools_or_provider_keys(self) -> None:
         script = (ROOT / "scripts" / "doctor.ps1").read_text("utf-8")
@@ -300,6 +412,19 @@ class PublicTemplateTests(unittest.TestCase):
             if step.get("uses", "").startswith("actions/checkout@")
         )
         self.assertFalse(checkout["with"]["persist-credentials"])
+
+    def test_declared_python_range_has_ci_coverage(self) -> None:
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))
+        self.assertEqual(project["project"]["requires-python"], ">=3.11")
+        workflow = (ROOT / ".github" / "workflows" / "audit.yml").read_text(
+            "utf-8"
+        )
+        self.assertIn('python-version: ["3.11", "3.14"]', workflow)
+
+    def test_retrieval_weights_are_not_claimed_for_official_mcp(self) -> None:
+        configuration = (ROOT / "docs" / "CONFIGURATION.md").read_text("utf-8")
+        self.assertIn("只影响 `ingest.py --search`", configuration)
+        self.assertIn("不会改写官方 WeKnora MCP", configuration)
 
     def test_cloudflare_setup_points_to_complete_start_command(self) -> None:
         setup = (ROOT / "mcp-public" / "setup-cloudflare.ps1").read_text("utf-8")
