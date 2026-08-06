@@ -68,6 +68,9 @@ HTTP_SESSION_LOCAL = threading.local()
 VISION_CACHE_LOCAL = threading.local()
 VERIFICATION_COUNTER_LOCK = threading.Lock()
 VERIFICATION_COUNTER = 0
+EMBEDDING_VERIFICATION_LOCK = threading.Lock()
+EMBEDDING_VERIFIED_THIS_PROCESS: set[str] = set()
+EMBEDDING_WARMED_THIS_PROCESS: set[str] = set()
 OCR_ENGINE_LOCK = threading.Lock()
 OCR_ENGINE = None
 NEO4J_STARTED_FOR_DELETE = False
@@ -6456,55 +6459,63 @@ def verify_embedding_model(cfg: dict, db: sqlite3.Connection) -> None:
         views.append(kb_data)
     model_ids = {view["embedding_model_id"] for view in views}
     if len(model_ids) != 1:
-        raise RuntimeError("父块和子块知识库没有使用同一个Embedding模型")
+        raise RuntimeError("父块、子块和原文知识库没有使用同一个Embedding模型")
     model_id = next(iter(model_ids))
-    fingerprint = (
-        f"{model_id}:{wc['models']['embedding_dimension']}:"
-        f"{wc['parent_knowledge_base']}:{wc['child_knowledge_base']}"
-    )
-    verified = db.execute(
-        "SELECT value FROM metadata WHERE key='verified_embedding'"
-    ).fetchone()
-    if verified and verified[0] == fingerprint:
-        print("Embedding配置指纹未变化，跳过重复实时测试")
-        return
-    local = wc["models"]["provider"] == "ollama"
-    request_body = {
-        "modelId": model_id,
-        "modelName": wc["models"]["embedding"],
-        "source": "local" if local else "remote",
-        "provider": wc["models"]["provider"],
-        "baseUrl": "",
-        "dimension": wc["models"]["embedding_dimension"],
-        "supportsDimensionOverride": local,
-    }
-    checked = run_command(
+    fingerprint = ":".join(
         [
-            executable,
-            "api",
-            "/api/v1/initialization/embedding/test",
-            "-d",
-            json.dumps(request_body, ensure_ascii=False),
-            "--format",
-            "json",
-            "--profile",
-            wc["setup_profile"],
-        ],
-        {"root": str(ROOT)},
-        ROOT,
-        timeout_seconds=180,
+            str(model_id),
+            str(wc["models"]["provider"]),
+            str(wc["models"]["embedding"]),
+            str(wc["models"]["embedding_dimension"]),
+            *(str(kb_id) for _, kb_id, _ in knowledge_bases),
+        ]
     )
-    server_data = checked.get("data", checked)
-    result = server_data.get("data", server_data)
-    expected = wc["models"]["embedding_dimension"]
-    if not result.get("available") or result.get("dimension") != expected:
-        raise RuntimeError(f"Embedding实际调用未通过: {result}")
-    db.execute(
-        """INSERT INTO metadata(key,value) VALUES('verified_embedding',?)
-        ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
-        (fingerprint,),
-    )
-    db.commit()
+    # A persisted success cannot prove that Ollama, its model, or the
+    # Docker-to-host route still works after either process restarts. Cache the
+    # expensive probe only inside this Python process; every fresh invocation
+    # must perform one real embedding call before it can ingest or delete data.
+    with EMBEDDING_VERIFICATION_LOCK:
+        if fingerprint in EMBEDDING_VERIFIED_THIS_PROCESS:
+            print("Embedding已在本次进程中真实调用通过，跳过重复测试")
+            return
+        local = wc["models"]["provider"] == "ollama"
+        request_body = {
+            "modelId": model_id,
+            "modelName": wc["models"]["embedding"],
+            "source": "local" if local else "remote",
+            "provider": wc["models"]["provider"],
+            "baseUrl": "",
+            "dimension": wc["models"]["embedding_dimension"],
+            "supportsDimensionOverride": local,
+        }
+        checked = run_command(
+            [
+                executable,
+                "api",
+                "/api/v1/initialization/embedding/test",
+                "-d",
+                json.dumps(request_body, ensure_ascii=False),
+                "--format",
+                "json",
+                "--profile",
+                wc["setup_profile"],
+            ],
+            {"root": str(ROOT)},
+            ROOT,
+            timeout_seconds=180,
+        )
+        server_data = checked.get("data", checked)
+        result = server_data.get("data", server_data)
+        expected = wc["models"]["embedding_dimension"]
+        if not result.get("available") or result.get("dimension") != expected:
+            raise RuntimeError(f"Embedding实际调用未通过: {result}")
+        EMBEDDING_VERIFIED_THIS_PROCESS.add(fingerprint)
+        db.execute(
+            """INSERT INTO metadata(key,value) VALUES('verified_embedding',?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+            (fingerprint,),
+        )
+        db.commit()
 
 
 def verify_heading_chunker(cfg: dict) -> None:
@@ -6570,23 +6581,33 @@ def warm_embedding_model(cfg: dict) -> None:
     ollama = cfg["ollama"]
     wc = cfg["weknora"]
     keep_alive = adaptive_embedding_keep_alive()
-    response = requests.post(
-        f"{ollama['base_url']}/api/embed",
-        json={
-            "model": wc["models"]["embedding"],
-            "input": "题库检索预热",
-            "keep_alive": keep_alive,
-        },
-        timeout=15,
-    )
-    response.raise_for_status()
-    embeddings = response.json().get("embeddings") or []
     expected = int(wc["models"]["embedding_dimension"])
-    if not embeddings or len(embeddings[0]) != expected:
-        raise RuntimeError(
-            f"Embedding预热维度异常，期望{expected}"
+    fingerprint = ":".join(
+        (
+            str(ollama["base_url"]),
+            str(wc["models"]["embedding"]),
+            str(expected),
+            str(keep_alive),
         )
-    print(f"Embedding已预热并弹性驻留{keep_alive}")
+    )
+    with EMBEDDING_VERIFICATION_LOCK:
+        if fingerprint in EMBEDDING_WARMED_THIS_PROCESS:
+            return
+        response = requests.post(
+            f"{ollama['base_url']}/api/embed",
+            json={
+                "model": wc["models"]["embedding"],
+                "input": "题库检索预热",
+                "keep_alive": keep_alive,
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        embeddings = response.json().get("embeddings") or []
+        if not embeddings or len(embeddings[0]) != expected:
+            raise RuntimeError(f"Embedding预热维度异常，期望{expected}")
+        EMBEDDING_WARMED_THIS_PROCESS.add(fingerprint)
+        print(f"Embedding已预热并弹性驻留{keep_alive}")
 
 
 def preflight(cfg: dict, db: sqlite3.Connection) -> None:
@@ -6611,17 +6632,13 @@ def preflight(cfg: dict, db: sqlite3.Connection) -> None:
         available = {item["name"] for item in tags.get("models", [])}
         if missing := required - available:
             raise RuntimeError(f"Ollama缺少模型: {sorted(missing)}")
-    verified_embedding = db.execute(
-        "SELECT value FROM metadata WHERE key='verified_embedding'"
-    ).fetchone()
-    if verified_embedding:
-        print("Embedding配置已有验证指纹，跳过日常重复预热")
-    elif embedding_is_local:
+    verify_embedding_model(cfg, db)
+    if embedding_is_local:
         try:
             warm_embedding_model(cfg)
         except requests.RequestException as exc:
             raise RuntimeError(
-                f"首次Embedding预热失败: {type(exc).__name__}"
+                f"Embedding预热失败: {type(exc).__name__}"
             ) from exc
     status_cmd = [
         wc["upload_command"][0], "kb", "status", "{kb}", "--format", "json",
@@ -6630,21 +6647,15 @@ def preflight(cfg: dict, db: sqlite3.Connection) -> None:
     for layer, kb_id in (
         ("父块", wc["parent_knowledge_base"]),
         ("子块", wc["child_knowledge_base"]),
+        ("原文", wc["raw_knowledge_base"]),
     ):
         status = run_command(
             status_cmd, {"root": str(ROOT), "kb": kb_id}, ROOT
         )
         if not status.get("data", status).get("retrieval_ready"):
-            if verified_embedding:
-                print(
-                    f"WeKnora{layer}知识库状态暂时繁忙，"
-                    "沿用已验证的Embedding配置继续恢复"
-                )
-                continue
             raise RuntimeError(
-                f"WeKnora{layer}知识库检索模型尚未配置，未开始MinerU解析"
+                f"WeKnora{layer}知识库尚未达到可检索状态，未开始MinerU解析"
             )
-    verify_embedding_model(cfg, db)
     verify_heading_chunker(cfg)
 
 

@@ -9,6 +9,7 @@ $Base = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $Base
 $Proxy = Join-Path $Root "bin\mcp-auth-proxy.exe"
 $WeKnora = Join-Path $Root "bin\weknora.exe"
+$LocalConfig = Join-Path $Root "config.local.yaml"
 $HashFile = Join-Path $Base "secrets\password-hash.txt"
 $DataDir = Join-Path $Base "data"
 $LogDir = Join-Path $Base "logs"
@@ -26,7 +27,7 @@ if (-not [Uri]::TryCreate($ExternalUrl, [UriKind]::Absolute, [ref]$ParsedExterna
 }
 $ExternalUrl = $ParsedExternalUrl.GetLeftPart([UriPartial]::Authority).TrimEnd('/')
 if ($ExternalUrl -eq "https://mcp.example.com") { throw "Replace the example MCP URL first." }
-foreach ($Required in $Proxy, $WeKnora, $HashFile) {
+foreach ($Required in $Proxy, $WeKnora, $HashFile, $LocalConfig) {
     if (-not (Test-Path $Required -PathType Leaf)) { throw "Missing required file: $Required" }
 }
 try {
@@ -38,6 +39,58 @@ $ProfileJson = (& $WeKnora profile list --format json 2>$null) -join "`n"
 if ($LASTEXITCODE -ne 0 -or -not (@(($ProfileJson | ConvertFrom-Json).data) | Where-Object { $_.name -eq $Profile })) {
     throw "Missing MCP profile '$Profile'. Run mcp-public/configure-readonly-profile.ps1 first."
 }
+
+function Invoke-WeKnoraJson([string[]]$Arguments, [string]$FailureMessage) {
+    $Raw = (& $WeKnora @Arguments 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0) { throw $FailureMessage }
+    try { return $Raw | ConvertFrom-Json } catch {
+        throw "$FailureMessage The official CLI returned malformed JSON."
+    }
+}
+
+# A listening proxy is not proof that the dedicated read-only credential can
+# still reach its knowledge bases or execute vector retrieval. Validate the
+# exact profile and one real hybrid search before exposing the public route.
+Invoke-WeKnoraJson @(
+    "doctor", "--no-cache", "--format", "json", "--profile", $Profile
+) "MCP profile '$Profile' failed the WeKnora doctor check. Reconfigure or renew its dedicated read-only API key." | Out-Null
+$KnowledgeBases = Invoke-WeKnoraJson @(
+    "kb", "list", "--limit", "10000", "--format", "json", "--profile", $Profile
+) "MCP profile '$Profile' cannot list its permitted knowledge bases."
+$VisibleKnowledgeBases = @($KnowledgeBases.data) | Where-Object { $_.id }
+if (-not $VisibleKnowledgeBases.Count) {
+    throw "MCP profile '$Profile' has no visible knowledge base. Grant retrieve access to at least one intended knowledge base."
+}
+$ConfigText = Get-Content -Raw -LiteralPath $LocalConfig
+$ExpectedKnowledgeBaseIds = [Collections.Generic.List[string]]::new()
+foreach ($Setting in "parent_knowledge_base", "child_knowledge_base", "raw_knowledge_base") {
+    $SettingMatch = [regex]::Match(
+        $ConfigText,
+        '(?m)^\s*' + [regex]::Escape($Setting) + '\s*:\s*["'']?(?<id>[^\s#"'']+)'
+    )
+    if (-not $SettingMatch.Success -or $SettingMatch.Groups['id'].Value -match '^__.+__$') {
+        throw "config.local.yaml does not contain a configured '$Setting' ID. Run scripts/configure-weknora.ps1 first."
+    }
+    $ExpectedKnowledgeBaseIds.Add($SettingMatch.Groups['id'].Value)
+}
+$VisibleIds = @($VisibleKnowledgeBases | ForEach-Object { [string]$_.id })
+$MissingKnowledgeBaseIds = @(
+    $ExpectedKnowledgeBaseIds | Where-Object { $_ -notin $VisibleIds }
+)
+if ($MissingKnowledgeBaseIds.Count) {
+    throw "MCP profile '$Profile' cannot see every configured question-bank layer. Missing knowledge-base IDs: $($MissingKnowledgeBaseIds -join ', '). Update the dedicated API key permissions and reconfigure the profile."
+}
+$ProbeKnowledgeBase = $VisibleKnowledgeBases | Where-Object {
+    [string]$_.id -eq $ExpectedKnowledgeBaseIds[0] -and $_.embedding_model_id
+} | Select-Object -First 1
+if (-not $ProbeKnowledgeBase) {
+    throw "The configured parent knowledge base is visible but has no embedding model. Repair its model configuration before exposing MCP."
+}
+Invoke-WeKnoraJson @(
+    "search", "chunks", "question bank startup health probe",
+    "--kb", ([string]$ProbeKnowledgeBase.id), "--limit", "1",
+    "--format", "json", "--profile", $Profile
+) "MCP profile '$Profile' could not complete a real hybrid search. Check its retrieve permission and the configured embedding service." | Out-Null
 
 New-Item -ItemType Directory -Force -Path $DataDir, $LogDir, (Split-Path -Parent $HashFile) | Out-Null
 $Sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
