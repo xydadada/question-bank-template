@@ -152,6 +152,11 @@ powershell -File .\mcp-public\start-all.ps1 `
 Neo4j。主要逻辑集中在 `ingest.py`，其余脚本只负责下载官方组件、生成本地配置
 和启动停止。组件来源与固定版本见 [第三方声明](THIRD_PARTY_NOTICES.md)。
 
+公开模板不是作者私人运行目录的镜像。它不会包含现成知识库、真实知识库 ID、
+账号 Profile、域名、Cloudflare Tunnel、运行数据库、日志、题库文件或私人构建的
+WeKnora CLI。下载者通过官方 CLI 创建自己的三层知识库；模板默认使用官方
+WeKnora MCP，不依赖作者机器上的排序、描述或分页定制。
+
 ## 贡献与许可
 
 提交代码前运行：

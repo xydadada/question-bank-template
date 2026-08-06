@@ -1,6 +1,7 @@
 import ast
 import re
 import subprocess
+import sys
 import tomllib
 import unittest
 from pathlib import Path
@@ -31,6 +32,24 @@ class PublicTemplateTests(unittest.TestCase):
     def test_ingest_parses(self) -> None:
         ast.parse((ROOT / "ingest.py").read_text("utf-8"))
 
+    def test_cli_help_starts_without_runtime_state(self) -> None:
+        """The documented entry point must load before any private setup exists."""
+        state_db = ROOT / "state.db"
+        self.assertFalse(state_db.exists())
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "ingest.py"), "--help"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--search", completed.stdout)
+        self.assertFalse(state_db.exists())
+
     def test_safe_destructive_defaults(self) -> None:
         config = yaml.safe_load((ROOT / "config.example.yaml").read_text("utf-8"))
         self.assertFalse(config["classification"]["delete_videos"])
@@ -39,6 +58,17 @@ class PublicTemplateTests(unittest.TestCase):
             config["document_classification"]["delete_other_source_after_markdown"]
         )
         self.assertFalse(config["cleanup"]["permanently_delete_source_after_search"])
+
+    def test_retrieval_only_defaults(self) -> None:
+        config = yaml.safe_load((ROOT / "config.example.yaml").read_text("utf-8"))
+        self.assertEqual(
+            config["weknora"]["features"],
+            {"summaries": False, "wiki": False, "graph": False},
+        )
+        self.assertEqual(
+            config["mcp_public"]["external_url"],
+            "https://mcp.example.com",
+        )
 
     def test_no_private_identifiers_in_tracked_files(self) -> None:
         patterns = [
