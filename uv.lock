@@ -648,30 +648,35 @@ wheels = [
 
 [[package]]
 name = "question-bank-ingest"
-version = "0.1.0"
+version = "0.1.1"
 source = { virtual = "." }
 dependencies = [
     { name = "bcrypt" },
-    { name = "onnxruntime" },
     { name = "pymupdf" },
     { name = "pypdf" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
-    { name = "rapidocr" },
     { name = "requests" },
+]
+
+[package.optional-dependencies]
+ocr = [
+    { name = "onnxruntime" },
+    { name = "rapidocr" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "bcrypt", specifier = ">=4.2" },
-    { name = "onnxruntime", specifier = ">=1.23" },
+    { name = "onnxruntime", marker = "extra == 'ocr'", specifier = ">=1.23" },
     { name = "pymupdf", specifier = ">=1.26" },
     { name = "pypdf", specifier = ">=5.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "rapidocr", specifier = ">=3.9" },
+    { name = "rapidocr", marker = "extra == 'ocr'", specifier = ">=3.9" },
     { name = "requests", specifier = ">=2.32" },
 ]
+provides-extras = ["ocr"]
 
 [[package]]
 name = "rapidocr"

@@ -85,7 +85,7 @@ ollama:
   context_chars: 500
   render_dpi: 120
   max_image_side: 1600
-  # 图片内容统一交给MiMo；保留OCR依赖但不在当前流程调用。
+  # 图片内容默认交给MiMo；如要启用本地OCR，先运行 uv sync --extra ocr。
   ocr_enabled: false
   ocr_version: PP-OCRv5
   ocr_min_chars: 12
@@ -132,6 +132,9 @@ pairing:
 
 weknora:
   enabled: true
+  # 只用于需要临时启动Neo4j删除旧索引时；可按本机环境修改。
+  wsl_distro: Ubuntu
+  neo4j_container: WeKnora-neo4j
   command_parallel: auto
   embedding_parallel: auto
   knowledge_base: "__PARENT_KB_ID__"
@@ -158,12 +161,8 @@ weknora:
   # 每份做父块、子块和原文混合检索；启动首份及每50组再独立检查向量和BM25。
   full_route_check_every: 50
   models:
-    # provider字段只描述Embedding；Wiki、摘要和图谱文本模型单独走云端MiMo。
+    # 基础模板只自动配置Embedding。ChatGPT通过MCP读取检索结果后在云端回答。
     provider: ollama
-    chat_provider: mimo
-    chat: mimo-v2.5-pro
-    vision_provider: mimo
-    vision: mimo-v2.5
     embedding: qwen3-embedding:0.6b
     embedding_dimension: 1024
     rerank: null
@@ -268,8 +267,7 @@ cleanup:
   delete_temporary_files: true
 
 mcp_public:
-  proxy_version: v2.10.2
-  listen_addr: 127.0.0.1:18081
+  # scripts/start.ps1 -Mcp 未显式传参时读取下面两项。
   external_url: https://mcp.example.com
-  weknora_profile: local
-  deferred_until_primary_retrieval: true
+  # 必须使用独立的最小权限API Key；不要复用建库和入库账号的Profile。
+  weknora_profile: mcp-readonly

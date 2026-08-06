@@ -11,6 +11,7 @@ $Root = Split-Path -Parent $PSScriptRoot
 $Runtime = Join-Path $Root ".runtime"
 $WeKnora = Join-Path $Runtime "WeKnora"
 $Bin = Join-Path $Root "bin"
+$WeKnoraExpectedCommit = "c64a48647cd6f7eb8b0fb020b2e8fec74ee375fb"
 
 function Require-Command([string]$Name, [string]$InstallUrl) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
@@ -25,6 +26,19 @@ function Download-WithResume([string]$Url, [string]$Destination) {
     & curl.exe -L --fail --retry 3 --retry-delay 2 --continue-at - --output $Partial $Url
     if ($LASTEXITCODE -ne 0) { throw "Download failed: $Url" }
     Move-Item -LiteralPath $Partial -Destination $Destination -Force
+}
+
+function Set-DotEnvValue([string]$Path, [string]$Name, [string]$Value) {
+    $Text = if (Test-Path $Path) { Get-Content -Raw -LiteralPath $Path } else { "" }
+    $Line = "$Name=$Value"
+    $Pattern = "(?m)^\s*" + [regex]::Escape($Name) + "\s*=.*$"
+    if ($Text -match $Pattern) {
+        $Text = [regex]::Replace($Text, $Pattern, $Line)
+    } else {
+        if ($Text -and -not $Text.EndsWith("`n")) { $Text += "`r`n" }
+        $Text += "$Line`r`n"
+    }
+    [IO.File]::WriteAllText($Path, $Text, [Text.UTF8Encoding]::new($false))
 }
 
 Require-Command git "https://git-scm.com/download/win"
@@ -74,6 +88,11 @@ if (-not (Test-Path (Join-Path $WeKnora ".git"))) {
     }
 }
 
+$ActualWeKnoraCommit = ((& git -C $WeKnora rev-parse HEAD) -join "").Trim().ToLowerInvariant()
+if ($ActualWeKnoraCommit -ne $WeKnoraExpectedCommit) {
+    throw "WeKnora source mismatch. Expected $WeKnoraExpectedCommit for $WeKnoraVersion, found $ActualWeKnoraCommit. Remove .runtime/WeKnora manually before retrying."
+}
+
 Push-Location (Join-Path $WeKnora "cli")
 try {
     $WeKnoraCommit = ((& git -C $WeKnora rev-parse --short=12 HEAD) -join "").Trim()
@@ -114,17 +133,17 @@ $WeKnoraEnv = Join-Path $WeKnora ".env"
 if (-not (Test-Path $WeKnoraEnv)) {
     Copy-Item (Join-Path $WeKnora ".env.example") $WeKnoraEnv
 }
+# Compose accepts host:port in these variables. Binding loopback prevents WeKnora
+# from being exposed to the LAN while keeping the documented UI port stable.
+Set-DotEnvValue $WeKnoraEnv "APP_PORT" "127.0.0.1:8080"
+Set-DotEnvValue $WeKnoraEnv "FRONTEND_PORT" "127.0.0.1:8088"
 
 if ($StartWeKnora) {
     $DistroNames = (& wsl.exe -l -q) -replace "`0", ""
     if ($DistroNames -notcontains $WslDistro) {
         throw "WSL distribution '$WslDistro' was not found."
     }
-    $WslPath = ((& wsl.exe -d $WslDistro -- wslpath -a $WeKnora) -join "").Trim()
-    if (-not $WslPath) { throw "Could not translate the WeKnora path for WSL." }
-    if ($WslPath.Contains("'")) { throw "Repository path cannot contain a single quote." }
-    & wsl.exe -d $WslDistro -- bash -lc "cd '$WslPath' && docker compose up -d"
-    if ($LASTEXITCODE -ne 0) { throw "WeKnora Docker startup failed." }
+    & (Join-Path $PSScriptRoot "start.ps1") -WslDistro $WslDistro
 }
 
 Write-Host "Bootstrap complete."

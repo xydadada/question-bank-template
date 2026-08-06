@@ -70,6 +70,10 @@ VERIFICATION_COUNTER = 0
 OCR_ENGINE_LOCK = threading.Lock()
 OCR_ENGINE = None
 NEO4J_STARTED_FOR_DELETE = False
+NEO4J_RUNTIME_CONFIG = {
+    "wsl_distro": "Ubuntu",
+    "container": "WeKnora-neo4j",
+}
 MEMORY_SAMPLE_LOCK = threading.Lock()
 MEMORY_SAMPLES: dict[str, deque[float]] = {}
 RUNTIME_RESOURCE_CONFIG: dict = {}
@@ -806,7 +810,7 @@ def adaptive_weknora_index_count(cfg: dict, pressure: int = 0) -> int:
 
 
 def load_settings(config_path: str | Path | None = None) -> dict:
-    global RUNTIME_RESOURCE_CONFIG, MIMO_GATE_INITIALIZED
+    global RUNTIME_RESOURCE_CONFIG, MIMO_GATE_INITIALIZED, NEO4J_RUNTIME_CONFIG
     load_dotenv(ROOT / ".env")
     load_dotenv(ROOT / "mineru-keys.env", override=False)
     load_dotenv(ROOT / "mimo-keys.env", override=False)
@@ -821,6 +825,13 @@ def load_settings(config_path: str | Path | None = None) -> dict:
         )
     os.environ["QUESTION_BANK_CONFIG"] = str(selected)
     cfg = yaml.safe_load(selected.read_text("utf-8"))
+    weknora_cfg = cfg.get("weknora", {})
+    NEO4J_RUNTIME_CONFIG = {
+        "wsl_distro": str(weknora_cfg.get("wsl_distro", "Ubuntu")),
+        "container": str(
+            weknora_cfg.get("neo4j_container", "WeKnora-neo4j")
+        ),
+    }
     RUNTIME_RESOURCE_CONFIG = dict(cfg.get("resource_control") or {})
     command_setting = cfg.get("weknora", {}).get("command_parallel", "auto")
     if str(command_setting).casefold() == "auto":
@@ -4938,8 +4949,8 @@ def stop_temporary_neo4j() -> None:
     try:
         run_hidden_process(
             [
-                "wsl.exe", "-d", "Ubuntu", "--",
-                "docker", "stop", "WeKnora-neo4j",
+                "wsl.exe", "-d", NEO4J_RUNTIME_CONFIG["wsl_distro"], "--",
+                "docker", "stop", NEO4J_RUNTIME_CONFIG["container"],
             ],
             timeout_seconds=90,
         )
@@ -4954,16 +4965,17 @@ def ensure_neo4j_for_delete() -> None:
     global NEO4J_STARTED_FOR_DELETE
     running = run_hidden_process(
         [
-            "wsl.exe", "-d", "Ubuntu", "--", "docker", "inspect",
-            "-f", "{{.State.Running}}", "WeKnora-neo4j",
+            "wsl.exe", "-d", NEO4J_RUNTIME_CONFIG["wsl_distro"], "--",
+            "docker", "inspect", "-f", "{{.State.Running}}",
+            NEO4J_RUNTIME_CONFIG["container"],
         ]
     ).casefold() == "true"
     if running:
         return
     run_hidden_process(
         [
-            "wsl.exe", "-d", "Ubuntu", "--",
-            "docker", "start", "WeKnora-neo4j",
+            "wsl.exe", "-d", NEO4J_RUNTIME_CONFIG["wsl_distro"], "--",
+            "docker", "start", NEO4J_RUNTIME_CONFIG["container"],
         ],
         timeout_seconds=120,
     )
@@ -4973,10 +4985,11 @@ def ensure_neo4j_for_delete() -> None:
     while time.time() < deadline:
         state = run_hidden_process(
             [
-                "wsl.exe", "-d", "Ubuntu", "--", "docker", "inspect",
+                "wsl.exe", "-d", NEO4J_RUNTIME_CONFIG["wsl_distro"], "--",
+                "docker", "inspect",
                 "-f",
                 "{{if .State.Health}}{{.State.Health.Status}}{{else}}running{{end}}",
-                "WeKnora-neo4j",
+                NEO4J_RUNTIME_CONFIG["container"],
             ]
         ).casefold()
         if state in {"healthy", "running"}:

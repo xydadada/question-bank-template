@@ -17,21 +17,26 @@ try {
     if ($FirstPlain -ne $SecondPlain) { throw "Passwords do not match." }
     if ($FirstPlain.Length -lt 10) { throw "Use at least 10 characters." }
 
-    $Psi = [Diagnostics.ProcessStartInfo]::new()
+    $Psi = New-Object Diagnostics.ProcessStartInfo
     $Psi.FileName = $Python
-    $Psi.ArgumentList.Add($Hasher)
+    $Psi.Arguments = '"' + $Hasher.Replace('"', '\"') + '"'
     $Psi.UseShellExecute = $false
     $Psi.RedirectStandardInput = $true
     $Psi.RedirectStandardOutput = $true
     $Psi.RedirectStandardError = $true
     $Process = [Diagnostics.Process]::Start($Psi)
-    $Process.StandardInput.WriteLine($FirstPlain)
+    $PasswordBytes = (New-Object Text.UTF8Encoding($false)).GetBytes(
+        $FirstPlain + [Environment]::NewLine
+    )
+    $Process.StandardInput.BaseStream.Write($PasswordBytes, 0, $PasswordBytes.Length)
+    $Process.StandardInput.BaseStream.Flush()
     $Process.StandardInput.Close()
     $Hash = $Process.StandardOutput.ReadToEnd().Trim()
-    $ErrorText = $Process.StandardError.ReadToEnd()
+    $null = $Process.StandardError.ReadToEnd()
     $Process.WaitForExit()
+    [Array]::Clear($PasswordBytes, 0, $PasswordBytes.Length)
     if ($Process.ExitCode -ne 0 -or -not $Hash.StartsWith('$2')) {
-        throw "Password hashing failed: $ErrorText"
+        throw "Password hashing failed. No password value was logged."
     }
 } finally {
     if ($FirstPtr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($FirstPtr) }
@@ -41,7 +46,8 @@ try {
 }
 
 New-Item -ItemType Directory -Force -Path $Secrets | Out-Null
-[IO.File]::WriteAllText($HashFile, $Hash, [Text.UTF8Encoding]::new($false))
 $Sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 & "$env:WINDIR\System32\icacls.exe" $Secrets /inheritance:r /grant:r "*${Sid}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Could not restrict the password-hash directory ACL." }
+[IO.File]::WriteAllText($HashFile, $Hash, [Text.UTF8Encoding]::new($false))
 Write-Host "Password hash saved to an ignored, current-user-only directory."

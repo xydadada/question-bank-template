@@ -1,5 +1,6 @@
 import ast
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -7,6 +8,22 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def publishable_files() -> list[Path]:
+    """Return Git-tracked files so a user's ignored local config cannot fail CI."""
+    try:
+        raw = subprocess.check_output(
+            ["git", "-C", str(ROOT), "ls-files", "-z"], stderr=subprocess.DEVNULL
+        )
+        return [ROOT / item.decode("utf-8") for item in raw.split(b"\0") if item]
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        excluded = {".git", ".runtime", ".venv", "bin", "inbox", "markdown"}
+        return [
+            path
+            for path in ROOT.rglob("*")
+            if path.is_file() and not any(part in excluded for part in path.parts)
+        ]
 
 
 class PublicTemplateTests(unittest.TestCase):
@@ -22,7 +39,7 @@ class PublicTemplateTests(unittest.TestCase):
         )
         self.assertFalse(config["cleanup"]["permanently_delete_source_after_search"])
 
-    def test_no_private_identifiers(self) -> None:
+    def test_no_private_identifiers_in_tracked_files(self) -> None:
         patterns = [
             re.compile(r"[A-Z]:\\Users\\", re.I),
             re.compile(
@@ -31,14 +48,16 @@ class PublicTemplateTests(unittest.TestCase):
                 re.I,
             ),
         ]
-        for path in ROOT.rglob("*"):
-            if not path.is_file() or any(
-                part in {".git", ".runtime", ".venv", "bin"} for part in path.parts
-            ):
-                continue
-            if path.name in {"test_public_template.py", "release-audit.ps1"}:
-                continue
-            if path.suffix not in {".py", ".ps1", ".md", ".yaml", ".yml", ".toml", ".txt"}:
+        for path in publishable_files():
+            if path.suffix not in {
+                ".py",
+                ".ps1",
+                ".md",
+                ".yaml",
+                ".yml",
+                ".toml",
+                ".txt",
+            }:
                 continue
             text = path.read_text("utf-8", errors="ignore")
             for pattern in patterns:
@@ -46,8 +65,71 @@ class PublicTemplateTests(unittest.TestCase):
 
     def test_runtime_data_is_ignored(self) -> None:
         ignored = (ROOT / ".gitignore").read_text("utf-8")
-        for entry in (".env", "config.local.yaml", "state.db*", "inbox/", "markdown/", "outputs/"):
+        for entry in (
+            ".env",
+            "config.local.yaml",
+            "state.db*",
+            "inbox/",
+            "markdown/",
+            "outputs/",
+            "*.pem",
+            "*.key",
+            "*.sqlite",
+        ):
             self.assertIn(entry, ignored)
+
+    def test_loopback_ports_and_pinned_weknora_source(self) -> None:
+        bootstrap = (ROOT / "scripts" / "bootstrap.ps1").read_text("utf-8")
+        self.assertIn('"APP_PORT" "127.0.0.1:8080"', bootstrap)
+        self.assertIn('"FRONTEND_PORT" "127.0.0.1:8088"', bootstrap)
+        self.assertRegex(bootstrap, r'WeKnoraExpectedCommit = "[0-9a-f]{40}"')
+        start = (ROOT / "scripts" / "start.ps1").read_text("utf-8")
+        self.assertIn("--cd $WeKnora -- docker compose up -d", start)
+        self.assertNotIn("wslpath", start)
+
+    def test_mcp_uses_separate_profile_and_documents_write_boundary(self) -> None:
+        config = yaml.safe_load((ROOT / "config.example.yaml").read_text("utf-8"))
+        self.assertEqual(config["mcp_public"]["weknora_profile"], "mcp-readonly")
+        start = (ROOT / "mcp-public" / "start.ps1").read_text("utf-8")
+        self.assertIn('"mcp-readonly"', start)
+        guide = (ROOT / "docs" / "CHATGPT_MCP.md").read_text("utf-8")
+        self.assertIn("chat", guide)
+        self.assertIn("session_ask", guide)
+        self.assertIn("禁用", guide)
+        local_test = (ROOT / "mcp-public" / "test-local.ps1").read_text("utf-8")
+        self.assertIn("-Method Post", local_test)
+        self.assertNotIn("401, 403, 405", local_test)
+        self.assertIn("[Uri]::TryCreate", start)
+        self.assertIn('$ParsedExternalUrl.Scheme -ne "https"', start)
+        root_start = (ROOT / "scripts" / "start.ps1").read_text("utf-8")
+        self.assertIn("mcp_public.external_url", root_start)
+        self.assertIn("-Profile $McpProfile", root_start)
+        tunnel_start = (ROOT / "mcp-public" / "start-cloudflare.ps1").read_text(
+            "utf-8"
+        )
+        self.assertIn("does not match Cloudflare ingress hostname", tunnel_start)
+        self.assertIn('"$PublicBase/healthz"', tunnel_start)
+        stop = (ROOT / "scripts" / "stop.ps1").read_text("utf-8")
+        self.assertIn("wsl-distro.txt", root_start)
+        self.assertIn("wsl-distro.txt", stop)
+
+    def test_example_env_has_no_inert_mcp_settings(self) -> None:
+        example = (ROOT / ".env.example").read_text("utf-8")
+        self.assertNotIn("MCP_EXTERNAL_URL", example)
+        self.assertNotIn("MCP_PUBLIC_HOSTNAME", example)
+        self.assertNotIn("CLOUDFLARE_TUNNEL_NAME", example)
+
+    def test_release_audit_scans_structured_credentials(self) -> None:
+        audit = (ROOT / "scripts" / "release-audit.ps1").read_text("utf-8")
+        self.assertIn('".json"', audit)
+        self.assertIn("TunnelSecret", audit)
+
+    def test_workflow_actions_are_immutable(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "audit.yml").read_text("utf-8")
+        uses = re.findall(r"(?m)^\s*uses:\s*\S+@([^\s#]+)", workflow)
+        self.assertGreaterEqual(len(uses), 3)
+        for revision in uses:
+            self.assertRegex(revision, r"^[0-9a-f]{40}$")
 
 
 if __name__ == "__main__":

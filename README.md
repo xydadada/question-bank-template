@@ -18,7 +18,7 @@ inbox 中的文件或压缩包
 → 生成父块、子块和原文三层 Markdown
 → 自动分类并上传三个 WeKnora 知识库
 → 三层向量 + BM25 混合检索
-→ 可选：只读 MCP + OAuth + Cloudflare Tunnel + ChatGPT
+→ 可选：官方受限 MCP + OAuth + Cloudflare Tunnel + ChatGPT
 ```
 
 图片描述和不确定分类默认走 MiMo；本地只需运行 Embedding。Wiki、图谱、摘要
@@ -27,18 +27,20 @@ inbox 中的文件或压缩包
 ## 安全默认值
 
 - 不提交 `.env`、`config.local.yaml`、知识库内容、Markdown、日志或 `state.db`。
-- 不自动开机启动，不修改 Windows 计划任务，不开放 WeKnora 的 8080 端口。
+- 不自动开机启动，不修改 Windows 计划任务；WeKnora 的 8080/8088 只绑定本机回环地址。
 - 不自动永久删除视频、压缩包、“其他资料”或已入库源文件。
 - 开启任何永久删除选项后，仍需在本机 `.env` 明确写入
   `QUESTION_BANK_ALLOW_PERMANENT_DELETE=I_UNDERSTAND`。
-- MCP 使用 WeKnora 官方只读工具面；OAuth 代理只监听 `127.0.0.1:18081`。
+- MCP 使用独立最小权限 Profile；OAuth 代理只监听 `127.0.0.1:18081`。
+- 官方 MCP 不含建库、上传、修改或删除工具；`chat` 与 `session_ask` 会写入会话记录，
+  严格检索模式必须在 ChatGPT Workspace 中禁用这两项。
 
 先用可丢弃的小样本确认流程。永久删除无法撤销。
 
 ## 前置条件
 
 - Windows 11、WSL2 Ubuntu
-- Docker Desktop 或 WSL 中可用的 Docker Engine + Compose
+- Docker Desktop（推荐路径：启用 Ubuntu 的 WSL integration）
 - Git for Windows
 - Python 3.11+（由 `uv` 管理项目环境）
 - [uv](https://docs.astral.sh/uv/)
@@ -46,6 +48,10 @@ inbox 中的文件或压缩包
 - [Ollama](https://ollama.com/download)
 - 7-Zip 的 `7z` 命令（仅压缩包输入需要）
 - 自己的 MinerU API Key；使用图片补充或模型分类时还需 MiMo API Key
+
+原生 WSL Docker 属于高级配置：容器必须能够访问 Ollama，不能直接假定
+`host.docker.internal:11434` 可用。默认脚本以 Docker Desktop + Windows Ollama 为
+经过验证的组合。
 
 ## 最短安装路径
 
@@ -57,7 +63,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1 -StartWeKnora
 
 脚本只在仓库内创建忽略目录、Python 环境、`.runtime/WeKnora` 和
 `bin/weknora.exe`。缺少需要管理员权限的系统组件时会停止并给出官方链接，
-不会替你静默安装。
+不会替你静默安装。WeKnora 固定到已核验的 Release 提交，API 与前端分别只绑定
+`127.0.0.1:8080` 和 `127.0.0.1:8088`。
 
 然后：
 
@@ -69,6 +76,19 @@ powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1 -StartWeKnora
 
 ```powershell
 powershell -File .\scripts\start.ps1 -Processing
+```
+
+只有显式启用本地 OCR 时才安装额外依赖，并在本地
+`config.local.yaml` 将 `ollama.ocr_enabled` 改为 `true`：
+
+```powershell
+uv sync --extra ocr
+```
+
+可用以下命令确认 OCR 包已安装；默认 MiMo 路径不需要执行它：
+
+```powershell
+uv run python -c "import rapidocr, onnxruntime; print('OCR extra ready')"
 ```
 
 查看状态或停止：
@@ -101,10 +121,11 @@ uv run python ingest.py --search "你的检索词"
 源文件删除不是默认行为。开启后，只有三层入库和检索检查完成的资料才进入删除
 逻辑；失败资料仍保留。详细开关见 [配置说明](docs/CONFIGURATION.md)。
 
-## ChatGPT 只读检索（可选）
+## ChatGPT 受限检索（可选）
 
 ```powershell
 powershell -File .\scripts\bootstrap.ps1 -InstallMcpTools
+powershell -File .\mcp-public\configure-readonly-profile.ps1
 powershell -File .\mcp-public\set-password.ps1
 powershell -File .\mcp-public\setup-cloudflare.ps1 `
   -Hostname mcp.your-domain.example -CreateDnsRoute
@@ -114,7 +135,8 @@ powershell -File .\mcp-public\start-all.ps1 `
 
 在实际使用的 ChatGPT Workspace 中，以 OAuth 方式添加
 `https://mcp.your-domain.example/mcp`。完整步骤、安全边界和验证命令见
-[ChatGPT MCP 指南](docs/CHATGPT_MCP.md)。
+[ChatGPT MCP 指南](docs/CHATGPT_MCP.md)。发布前应在 Workspace 中禁用
+`chat` 与 `session_ask`，只保留八个读取/检索工具。
 
 ## 自定义分类
 
@@ -137,7 +159,7 @@ powershell -File .\scripts\release-audit.ps1
 uv run python -m unittest discover -s tests -v
 ```
 
-`docs/audit.workflow.example.yml` 是等价的 GitHub Actions 示例。仓库管理员可在
-具有 `workflow` 写权限时复制到 `.github/workflows/audit.yml` 启用自动检查。
+`.github/workflows/audit.yml` 会在 push 和 pull request 时自动运行相同检查；
+所有 Action 都固定到不可变提交。
 
 代码采用 [MIT License](LICENSE)。第三方组件保留各自许可证。

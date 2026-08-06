@@ -4,6 +4,7 @@ This repository does not redistribute the following projects. Bootstrap scripts
 download or build them from their official locations; their own licenses apply.
 
 - [Tencent WeKnora](https://github.com/Tencent/WeKnora), pinned to `v0.7.1`
+  commit `c64a48647cd6f7eb8b0fb020b2e8fec74ee375fb`
 - [MinerU API](https://mineru.net/doc/docs/)
 - [Ollama](https://ollama.com/)
 - [qwen3-embedding](https://ollama.com/library/qwen3-embedding)

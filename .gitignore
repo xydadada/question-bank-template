@@ -1,9 +1,12 @@
 # Local configuration and secrets
 .env
+.env.*
+!.env.example
 *.local.env
 mineru-keys.env
 mimo-keys.env
 config.local.yaml
+profiles/*.local.yaml
 mcp-public/secrets/
 mcp-public/data/
 mcp-public/logs/
@@ -18,9 +21,22 @@ markdown/
 failed/
 outputs/
 state.db*
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
 *.log
 *.pid
 .*.lock
+
+# Private keys, certificates and token exports
+*.pem
+*.key
+*.p12
+*.pfx
+*.token
+*.secrets.*
 
 # Downloaded/build runtime
 .runtime/
