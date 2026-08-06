@@ -59,6 +59,29 @@ class PublicTemplateTests(unittest.TestCase):
         )
         self.assertFalse(config["cleanup"]["permanently_delete_source_after_search"])
 
+    def test_manual_deletion_requires_explicit_confirmation(self) -> None:
+        tree = ast.parse((ROOT / "ingest.py").read_text("utf-8"))
+        functions = {
+            node.name: node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        sync = functions["sync_manual_deletions"]
+        confirmation_calls = [
+            node
+            for node in ast.walk(sync)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "require_permanent_delete_confirmation"
+        ]
+        self.assertEqual(len(confirmation_calls), 1)
+        self.assertIn("if not dry_run", ast.unparse(sync))
+
+    def test_archive_status_matches_retention_policy(self) -> None:
+        source = (ROOT / "ingest.py").read_text("utf-8")
+        self.assertIn("压缩包已展开并永久删除原包", source)
+        self.assertIn("压缩包已展开，原包已移至archives保留", source)
+
     def test_retrieval_only_defaults(self) -> None:
         config = yaml.safe_load((ROOT / "config.example.yaml").read_text("utf-8"))
         self.assertEqual(
@@ -143,6 +166,11 @@ class PublicTemplateTests(unittest.TestCase):
         stop = (ROOT / "scripts" / "stop.ps1").read_text("utf-8")
         self.assertIn("wsl-distro.txt", root_start)
         self.assertIn("wsl-distro.txt", stop)
+
+    def test_password_hashing_enforces_bcrypt_limit_and_clears_bytes(self) -> None:
+        script = (ROOT / "mcp-public" / "set-password.ps1").read_text("utf-8")
+        self.assertIn("GetByteCount($FirstPlain) -gt 72", script)
+        self.assertIn("[Array]::Clear($PasswordBytes", script)
 
     def test_example_env_has_no_inert_mcp_settings(self) -> None:
         example = (ROOT / ".env.example").read_text("utf-8")

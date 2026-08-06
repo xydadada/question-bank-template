@@ -809,6 +809,16 @@ def adaptive_weknora_index_count(cfg: dict, pressure: int = 0) -> int:
     return min(configured_max, base)
 
 
+def require_permanent_delete_confirmation(action: str) -> None:
+    if os.getenv("QUESTION_BANK_ALLOW_PERMANENT_DELETE", "") == "I_UNDERSTAND":
+        return
+    raise RuntimeError(
+        f"{action}会永久删除本地文件或远端索引，但尚未显式确认。"
+        "若你已经理解且接受不可恢复删除，请在本机.env中设置"
+        "QUESTION_BANK_ALLOW_PERMANENT_DELETE=I_UNDERSTAND。"
+    )
+
+
 def load_settings(config_path: str | Path | None = None) -> dict:
     global RUNTIME_RESOURCE_CONFIG, MIMO_GATE_INITIALIZED, NEO4J_RUNTIME_CONFIG
     load_dotenv(ROOT / ".env")
@@ -906,13 +916,9 @@ def load_settings(config_path: str | Path | None = None) -> dict:
     enabled_destructive = [
         name for name, enabled in destructive_options.items() if bool(enabled)
     ]
-    if enabled_destructive and os.getenv(
-        "QUESTION_BANK_ALLOW_PERMANENT_DELETE", ""
-    ) != "I_UNDERSTAND":
-        raise RuntimeError(
-            "检测到永久删除选项，但未显式确认。若你已经理解且接受不可恢复删除，"
-            "请在本机.env中设置QUESTION_BANK_ALLOW_PERMANENT_DELETE=I_UNDERSTAND。"
-            f" 已启用: {', '.join(enabled_destructive)}"
+    if enabled_destructive:
+        require_permanent_delete_confirmation(
+            "检测到永久删除选项: " + ", ".join(enabled_destructive)
         )
     return cfg
 
@@ -1798,7 +1804,10 @@ def classify_inbox(cfg: dict) -> ClassificationStats:
                 ):
                     queue.append((nested, depth + 1))
                     queued.add(resolved)
-            print(f"压缩包已展开并永久删除原包: {archive.name}")
+            if classification.get("delete_archives_after_extract", False):
+                print(f"压缩包已展开并永久删除原包: {archive.name}")
+            else:
+                print(f"压缩包已展开，原包已移至archives保留: {archive.name}")
         except Exception as exc:
             stats.archives_failed += 1
             try:
@@ -5606,6 +5615,8 @@ def sync_manual_deletions(
     selection_path = selection_path.resolve()
     if not selection_path.is_file():
         raise RuntimeError(f"手动删除差异文件不存在: {selection_path}")
+    if not dry_run:
+        require_permanent_delete_confirmation("手动删除同步")
     payload = json.loads(selection_path.read_text("utf-8"))
     markdown_selected = {
         str(item.get("group_id") or "")

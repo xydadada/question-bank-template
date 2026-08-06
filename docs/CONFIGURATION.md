@@ -51,4 +51,7 @@
 QUESTION_BANK_ALLOW_PERMANENT_DELETE=I_UNDERSTAND
 ```
 
+非演练模式的 `--sync-manual-deletions` 也受同一确认门保护；
+`--manual-deletion-dry-run` 只统计范围，不要求确认，也不会执行删除。
+
 这是一道防误操作门，不是备份。建议始终先复制少量可丢弃文件做首次确认。

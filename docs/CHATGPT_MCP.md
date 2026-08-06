@@ -22,8 +22,8 @@ ChatGPT Workspace
 2. 域名已托管到自己的 Cloudflare 账号。
 3. 运行 `scripts/bootstrap.ps1 -InstallMcpTools`。脚本固定并验证
    `mcp-auth-proxy v2.10.2` 的 SHA-256，并验证 cloudflared 的 Authenticode 签名。
-4. 运行 `mcp-public/set-password.ps1`。仓库只保存 bcrypt 哈希到忽略目录，
-   不保存明文密码。
+4. 运行 `mcp-public/set-password.ps1`。密码至少10个字符且不超过72个UTF-8字节；
+   仓库只保存 bcrypt 哈希到忽略目录，不保存明文密码。
 5. 在 WeKnora 中创建独立、最小权限的 API Key：只选择 `retrieve` 能力，只勾选
    准备公开给 ChatGPT 的知识库；不要授予 `ingest`、`manage_kbs` 或其他管理能力。
    随后运行：
