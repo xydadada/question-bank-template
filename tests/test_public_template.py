@@ -368,6 +368,8 @@ class PublicTemplateTests(unittest.TestCase):
         audit = (ROOT / "scripts" / "release-audit.ps1").read_text("utf-8")
         self.assertIn('".json"', audit)
         self.assertIn("TunnelSecret", audit)
+        self.assertIn("WEKNORA_API_KEY", audit)
+        self.assertIn("PASSWORD_HASH", audit)
         self.assertIn("AGPL PyMuPDF dependency", audit)
 
     def test_citation_has_authors_and_matches_package_version(self) -> None:
@@ -385,6 +387,8 @@ class PublicTemplateTests(unittest.TestCase):
     def test_release_audit_checks_reachable_commit_emails(self) -> None:
         audit = (ROOT / "scripts" / "release-audit.ps1").read_text("utf-8")
         self.assertIn("rev-list --all", audit)
+        self.assertIn("--format='%B'", audit)
+        self.assertIn('Test-PublishableText "commit-message"', audit)
         self.assertIn("%ae%x09%ce", audit)
         self.assertIn("users\\.noreply\\.github\\.com", audit)
         self.assertIn("non-noreply commit email", audit)
@@ -438,6 +442,26 @@ class PublicTemplateTests(unittest.TestCase):
         self.assertGreaterEqual(len(uses), 3)
         for revision in uses:
             self.assertRegex(revision, r"^[0-9a-f]{40}$")
+
+    def test_setup_uv_binary_version_is_pinned(self) -> None:
+        for relative_path in (
+            Path(".github/workflows/audit.yml"),
+            Path("docs/audit.workflow.example.yml"),
+        ):
+            workflow = yaml.safe_load((ROOT / relative_path).read_text("utf-8"))
+            setup_steps = [
+                step
+                for job in workflow["jobs"].values()
+                for step in job["steps"]
+                if step.get("uses", "").startswith("astral-sh/setup-uv@")
+            ]
+            self.assertGreater(len(setup_steps), 0, str(relative_path))
+            for step in setup_steps:
+                self.assertEqual(
+                    step.get("with", {}).get("version"),
+                    "0.12.2",
+                    str(relative_path),
+                )
 
 
 if __name__ == "__main__":

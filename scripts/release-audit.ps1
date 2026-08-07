@@ -28,7 +28,9 @@ $Forbidden = @(
     @{ Name = "Google API key"; Pattern = '\bAIza[0-9A-Za-z_-]{35}\b' },
     @{ Name = "likely OpenAI-style key"; Pattern = '(?i)\bsk-[A-Za-z0-9_-]{20,}\b' },
     @{ Name = "Cloudflare token assignment"; Pattern = '(?im)^(?:CF_API_TOKEN|CLOUDFLARE_API_TOKEN)[ \t]*=[ \t]*[^\s#]{20,}' }
+    @{ Name = "WeKnora or proxy credential assignment"; Pattern = '(?im)^(?:WEKNORA_API_KEY|WEKNORA_TOKEN|PASSWORD_HASH)[ \t]*=[ \t]*[^\s#]{12,}' }
     @{ Name = "structured credential value"; Pattern = '(?i)"(?:TunnelSecret|client_secret|private_key|refresh_token)"\s*:\s*"[^"\r\n]{12,}"' }
+    @{ Name = "OAuth or tunnel credential assignment"; Pattern = '(?im)^\s*["'']?(?:TunnelSecret|client_secret|refresh_token)["'']?\s*[:=]\s*["'']?[^"''\s#]{12,}' }
 )
 
 function Test-PublishableText([string]$RelativePath, [string]$Text, [string]$Source) {
@@ -194,6 +196,10 @@ foreach ($Workflow in $Files | Where-Object { $_.FullName -match '[\\/]\.github[
 if (Test-Path (Join-Path $Root ".git")) {
     $Commits = @(& git -C $Root rev-list --all)
     foreach ($Commit in $Commits) {
+        $CommitMessage = (& git -C $Root show -s --format='%B' $Commit 2>$null) -join "`n"
+        if ($LASTEXITCODE -eq 0) {
+            Test-PublishableText "commit-message" $CommitMessage "history $($Commit.Substring(0, 12))"
+        }
         $CommitEmails = ((& git -C $Root show -s --format='%ae%x09%ce' $Commit) -join "").Split("`t")
         foreach ($CommitEmail in $CommitEmails) {
             if ($CommitEmail -notmatch '^(?i)(?:noreply@github\.com|(?:[0-9]+\+)?[A-Z0-9_.\[\]-]+@users\.noreply\.github\.com)$') {
