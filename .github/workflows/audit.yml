@@ -31,6 +31,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
         with:
+          version: "0.12.2"
           enable-cache: true
 
       - name: Sync locked dependencies
@@ -67,6 +68,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
         with:
+          version: "0.12.2"
           enable-cache: true
 
       - name: Sync locked dependencies
