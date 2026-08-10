@@ -32,7 +32,6 @@ classification:
     - .mpg
     - .mpeg
     - .3gp
-    - .ts
     - .mts
     - .m2ts
     - .vob
@@ -52,13 +51,11 @@ classification:
   unsupported_to_failed: true
 
 document_classification:
-  enabled: true
   taxonomy_file: profiles/physics-question-bank.yaml
   max_mimo_chars: 12000
   mimo_min_confidence: 0.75
   other_min_confidence: 0.90
   version: 3
-  inject_visible_line: true
   delete_other_source_after_markdown: false
 
 mineru:
@@ -67,7 +64,6 @@ mineru:
   language: ch
   poll_seconds: 60
   submission_workers_per_key: 1
-  submission_workers_max: auto
   timeout_seconds: 86400
   max_pages: 200
   split_pages: 190
@@ -122,10 +118,6 @@ ollama:
     classification_fallback_to_ollama: false
 
 pairing:
-  parse_all_before_merge: true
-  group_identity: logical_name_and_content_sha256
-  missing_answer: empty
-  unmatched_answer_indexed: false
   # 子块按段落和题答边界切分；1200是基准，不是固定长度。
   # 程序按资料类型和字段在800至1600字符之间弹性调整。
   child_chars: 1200
@@ -136,7 +128,6 @@ weknora:
   wsl_distro: Ubuntu
   neo4j_container: WeKnora-neo4j
   command_parallel: auto
-  embedding_parallel: auto
   knowledge_base: "__PARENT_KB_ID__"
   parent_knowledge_base: "__PARENT_KB_ID__"
   child_knowledge_base: "__CHILD_KB_ID__"
@@ -165,12 +156,6 @@ weknora:
     provider: ollama
     embedding: qwen3-embedding:0.6b
     embedding_dimension: 1024
-    rerank: null
-  features:
-    # 仅父块库开启；子块库和原文库继续关闭，避免三份重复生成。
-    summaries: false
-    wiki: false
-    graph: false
   upload_command:
     - "{root}/bin/weknora.exe"
     - doc
@@ -265,6 +250,11 @@ resource_control:
 cleanup:
   permanently_delete_source_after_search: false
   delete_temporary_files: true
+
+manual_deletions:
+  # Detecting a missing source/Markdown must not silently arm whole-material
+  # deletion. Enable only with the separate confirmation variable in .env.
+  auto_sync: false
 
 mcp_public:
   # scripts/start.ps1 -Mcp 未显式传参时读取下面两项。

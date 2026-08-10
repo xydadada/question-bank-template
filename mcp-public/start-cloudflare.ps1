@@ -9,12 +9,36 @@ $Config = Join-Path $Base "cloudflare\config.yml"
 $LogDir = Join-Path $Base "logs"
 $PidFile = Join-Path $Base "cloudflared.pid"
 $FingerprintFile = Join-Path $Base "cloudflare\runtime-config.sha256"
+
+$MutexHasher = [Security.Cryptography.SHA256]::Create()
+try {
+    $MutexDigest = ([BitConverter]::ToString(
+        $MutexHasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($Root.ToLowerInvariant()))
+    )).Replace('-', '').Substring(0, 24)
+} finally { $MutexHasher.Dispose() }
+$StartMutex = [Threading.Mutex]::new($false, "Local\QuestionBank-$MutexDigest-CloudflaredStart")
+$StartMutexOwned = $false
+try { $StartMutexOwned = $StartMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $StartMutexOwned = $true }
+if (-not $StartMutexOwned) {
+    $StartMutex.Dispose()
+    throw "Another cloudflared start operation is already running for this template."
+}
+
+try {
 foreach ($Required in $Cloudflared, $Config) {
     if (-not (Test-Path $Required -PathType Leaf)) { throw "Missing required file: $Required" }
 }
-$HostnameMatch = Select-String -LiteralPath $Config -Pattern '^\s*-\s*hostname:\s*(\S+)\s*$' | Select-Object -First 1
-if (-not $HostnameMatch) { throw "Cloudflare config has no hostname ingress rule." }
-$Hostname = $HostnameMatch.Matches[0].Groups[1].Value
+$ConfigText = [IO.File]::ReadAllText($Config, [Text.Encoding]::UTF8)
+$HostnameMatches = [regex]::Matches($ConfigText, '(?m)^\s*-\s*hostname:\s*(\S+)\s*$')
+$ServiceMatches = [regex]::Matches($ConfigText, '(?m)^\s*(?:-\s*)?service:\s*(\S+)\s*$')
+if ($HostnameMatches.Count -ne 1 -or $ServiceMatches.Count -ne 2) {
+    throw "Cloudflare config must contain exactly one hostname route, one local MCP service, and one 404 fallback."
+}
+$Hostname = $HostnameMatches[0].Groups[1].Value
+if ($ServiceMatches[0].Groups[1].Value -ne "http://127.0.0.1:18081" -or
+    $ServiceMatches[1].Groups[1].Value -ne "http_status:404") {
+    throw "Cloudflare ingress may only expose 127.0.0.1:18081 and must end with http_status:404."
+}
 $ParsedExternalUrl = $null
 if (-not [Uri]::TryCreate($ExternalUrl, [UriKind]::Absolute, [ref]$ParsedExternalUrl) -or
     $ParsedExternalUrl.Scheme -ne "https" -or -not $ParsedExternalUrl.Host -or
@@ -27,10 +51,24 @@ if (-not $ParsedExternalUrl.Host.Equals($Hostname, [StringComparison]::OrdinalIg
 }
 $PublicBase = $ParsedExternalUrl.GetLeftPart([UriPartial]::Authority).TrimEnd('/')
 $ExpectedFingerprint = (Get-FileHash -Algorithm SHA256 -LiteralPath $Config).Hash.ToLowerInvariant()
+$RecordedPid = 0
+if (Test-Path $PidFile) {
+    try { $RecordedPid = [int](Get-Content -Raw -LiteralPath $PidFile) } catch { $RecordedPid = 0 }
+}
+$ExpectedPath = [IO.Path]::GetFullPath($Cloudflared)
+$ManagedCloudflared = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.ExecutablePath -and
+    [IO.Path]::GetFullPath($_.ExecutablePath).Equals($ExpectedPath, [StringComparison]::OrdinalIgnoreCase) -and
+    $_.CommandLine -match '(?i)tunnel.*run' -and
+    $_.CommandLine -match [regex]::Escape($Config)
+})
+if ($ManagedCloudflared.Count -gt 1 -or
+    ($ManagedCloudflared.Count -eq 1 -and $ManagedCloudflared[0].ProcessId -ne $RecordedPid)) {
+    throw "Found an untracked or duplicate cloudflared process for this template. Run mcp-public/stop.ps1 before starting again."
+}
 if (Test-Path $PidFile) {
     try { $ExistingPid = [int](Get-Content -Raw -LiteralPath $PidFile) } catch { $ExistingPid = 0 }
     $Existing = if ($ExistingPid) { Get-CimInstance Win32_Process -Filter "ProcessId=$ExistingPid" -ErrorAction SilentlyContinue } else { $null }
-    $ExpectedPath = [IO.Path]::GetFullPath($Cloudflared)
     $MatchesCloudflared = $Existing -and $Existing.ExecutablePath -and
         [IO.Path]::GetFullPath($Existing.ExecutablePath).Equals($ExpectedPath, [StringComparison]::OrdinalIgnoreCase) -and
         $Existing.CommandLine -match '(?i)tunnel.*run' -and
@@ -95,3 +133,7 @@ if (Get-Process -Id $Process.Id -ErrorAction SilentlyContinue) {
 Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $FingerprintFile -Force -ErrorAction SilentlyContinue
 throw "Cloudflare Tunnel did not become publicly healthy within 90 seconds. Check DNS and mcp-public/logs/cloudflared.stderr.log."
+} finally {
+    if ($StartMutexOwned) { $StartMutex.ReleaseMutex() }
+    $StartMutex.Dispose()
+}

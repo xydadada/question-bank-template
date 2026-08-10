@@ -21,17 +21,20 @@ inbox 中的文件或压缩包
 → 可选：官方受限 MCP + OAuth + Cloudflare Tunnel + ChatGPT
 ```
 
-图片描述和不确定分类默认走 MiMo；本地只需运行 Embedding。Wiki、图谱、摘要
-与永久删除默认关闭。
+图片描述和不确定分类默认走 MiMo；本地只需运行 Embedding。模板不自动配置
+Wiki、图谱、摘要或 Rerank，永久删除默认关闭。
 
 ## 安全默认值
 
 - 不提交 `.env`、`config.local.yaml`、知识库内容、Markdown、日志或 `state.db`。
 - 不自动开机启动，不修改 Windows 计划任务；WeKnora 的 8080/8088 只绑定本机回环地址。
+- 引导脚本把上游 Redis/Neo4j 的重启策略覆盖为 `unless-stopped`，手动停止后
+  Docker 或 Windows 重启不会把它们自行拉起。
 - 不自动永久删除视频、压缩包、“其他资料”或已入库源文件。
-- 开启任何永久删除选项，或执行非演练模式的 `--sync-manual-deletions`，
-  都必须在本机 `.env` 明确写入
-  `QUESTION_BANK_ALLOW_PERMANENT_DELETE=I_UNDERSTAND`。
+- 开启源文件、视频或压缩包永久删除选项，必须在本机 `.env` 明确写入
+  `QUESTION_BANK_ALLOW_PERMANENT_DELETE=I_UNDERSTAND`；人工删除级联同步使用
+  独立确认 `QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC=I_UNDERSTAND`，两种授权
+  不会互相代替。
 - MCP 使用独立最小权限 Profile；OAuth 代理只监听 `127.0.0.1:18081`。
 - 官方 MCP 不含建库、上传、修改或删除工具；`chat` 与 `session_ask` 会写入会话记录，
   严格检索模式必须在 ChatGPT Workspace 中禁用这两项。
@@ -123,6 +126,7 @@ uv run python ingest.py --search "你的检索词"
 
 源文件删除不是默认行为。开启后，只有三层入库和检索检查完成的资料才进入删除
 逻辑；失败资料仍保留。详细开关见 [配置说明](docs/CONFIGURATION.md)。
+会安全停止而不是猜测处理的边界见 [已知限制](docs/KNOWN_LIMITATIONS.md)。
 
 ## ChatGPT 受限检索（可选）
 

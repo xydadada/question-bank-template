@@ -54,7 +54,14 @@
 QUESTION_BANK_ALLOW_PERMANENT_DELETE=I_UNDERSTAND
 ```
 
-非演练模式的 `--sync-manual-deletions` 也受同一确认门保护；
-`--manual-deletion-dry-run` 只统计范围，不要求确认，也不会执行删除。
+非演练模式的 `--sync-manual-deletions` 和
+`manual_deletions.auto_sync: true` 使用独立确认门：
+
+```dotenv
+QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC=I_UNDERSTAND
+```
+
+`--manual-deletion-dry-run` 只统计范围，不要求确认，也不会执行删除。开启视频或
+源文件清理不会顺带授权人工删除级联。
 
 这是一道防误操作门，不是备份。建议始终先复制少量可丢弃文件做首次确认。

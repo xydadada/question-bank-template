@@ -45,14 +45,16 @@ $Failures = [Collections.Generic.List[string]]::new()
 try { & (Join-Path $Root "mcp-public\stop.ps1") } catch { $Failures.Add($_.Exception.Message) }
 
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
+$IngestScript = Join-Path $Root "ingest.py"
+$IngestPattern = '(?i)' + [regex]::Escape($IngestScript) + '.*--supervise'
 try {
-    Stop-ManagedProcess (Join-Path $Runtime "ingest.pid") $Python "(?i)ingest\.py.*--supervise" "ingestion supervisor"
+    Stop-ManagedProcess (Join-Path $Runtime "ingest.pid") $Python $IngestPattern "ingestion supervisor"
 } catch { $Failures.Add($_.Exception.Message) }
 
 if ($StopWeKnora) {
     $WeKnora = Join-Path $Runtime "WeKnora"
     if (Test-Path $WeKnora) {
-        & $WslExe -d $WslDistro --cd $WeKnora -- docker compose stop
+        & $WslExe -d $WslDistro --cd $WeKnora -- docker compose --profile "*" stop
         if ($LASTEXITCODE -ne 0) { $Failures.Add("WeKnora Docker stop failed.") }
     }
     $DistroPattern = [regex]::Escape($WslDistro)

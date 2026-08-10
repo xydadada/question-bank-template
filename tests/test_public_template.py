@@ -1,10 +1,14 @@
 import ast
+import os
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -54,6 +58,30 @@ class PublicTemplateTests(unittest.TestCase):
         self.assertIn("--search", completed.stdout)
         self.assertFalse(state_db.exists())
 
+    def test_cli_rejects_empty_or_conflicting_primary_operations(self) -> None:
+        """Malformed maintenance commands must never fall through to ingestion."""
+        state_db = ROOT / "state.db"
+        for arguments in (
+            ["--search", ""],
+            ["--sync-manual-deletions", ""],
+            ["--status", "--prequeue-only"],
+            ["--manual-deletion-dry-run"],
+            ["--delete-old-indexes"],
+            ["--migration-group", "group-1"],
+        ):
+            completed = subprocess.run(
+                [sys.executable, str(ROOT / "ingest.py"), *arguments],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 2, (arguments, completed.stderr))
+            self.assertFalse(state_db.exists())
+
     def test_safe_destructive_defaults(self) -> None:
         config = yaml.safe_load((ROOT / "config.example.yaml").read_text("utf-8"))
         self.assertFalse(config["classification"]["delete_videos"])
@@ -62,6 +90,7 @@ class PublicTemplateTests(unittest.TestCase):
             config["document_classification"]["delete_other_source_after_markdown"]
         )
         self.assertFalse(config["cleanup"]["permanently_delete_source_after_search"])
+        self.assertFalse(config["manual_deletions"]["auto_sync"])
 
     def test_manual_deletion_requires_explicit_confirmation(self) -> None:
         tree = ast.parse((ROOT / "ingest.py").read_text("utf-8"))
@@ -76,22 +105,306 @@ class PublicTemplateTests(unittest.TestCase):
             for node in ast.walk(sync)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "require_permanent_delete_confirmation"
+            and node.func.id == "require_manual_deletion_sync_confirmation"
         ]
         self.assertEqual(len(confirmation_calls), 1)
         self.assertIn("if not dry_run", ast.unparse(sync))
+
+    def test_delete_source_with_audit_requires_confirmation_itself(self) -> None:
+        """Every source-deletion call path must enforce the safety interlock."""
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            source = work / "source.pdf"
+            canonical = work / "retained.md"
+            source.write_bytes(b"source bytes")
+            canonical.write_text("# Retained\n\nBody\n", encoding="utf-8")
+            digest = ingest.sha256(source)
+            database = sqlite3.connect(":memory:")
+            database.execute("""CREATE TABLE deletion_audit(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_path TEXT NOT NULL, sha256 TEXT NOT NULL,
+                group_id TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL,
+                markdown_path TEXT NOT NULL, markdown_sha256 TEXT NOT NULL,
+                requested_at INTEGER NOT NULL, completed_at INTEGER,
+                success INTEGER NOT NULL DEFAULT 0,
+                error TEXT NOT NULL DEFAULT '')""")
+            with mock.patch.dict(
+                os.environ,
+                {"QUESTION_BANK_ALLOW_PERMANENT_DELETE": ""},
+            ):
+                with self.assertRaisesRegex(RuntimeError, "尚未显式确认"):
+                    ingest.delete_source_with_audit(
+                        database,
+                        source,
+                        digest,
+                        canonical,
+                        "test deletion",
+                        "group-1",
+                    )
+            self.assertTrue(source.is_file())
+            self.assertEqual(
+                database.execute("SELECT COUNT(*) FROM deletion_audit").fetchone()[0],
+                0,
+            )
+            database.close()
+
+    def test_cleanup_marks_completed_when_source_retention_is_configured(self) -> None:
+        """Retention mode must not enqueue an endless deletion retry loop."""
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            source = work / "source.pdf"
+            canonical = work / "retained.md"
+            source.write_bytes(b"source bytes")
+            canonical.write_text("# Retained\n\nBody\n", encoding="utf-8")
+            digest = ingest.sha256(source)
+            database = sqlite3.connect(":memory:")
+            database.row_factory = sqlite3.Row
+            database.execute("""CREATE TABLE files(
+                sha256 TEXT PRIMARY KEY, source_path TEXT, batch_id TEXT,
+                state TEXT, markdown_path TEXT, error TEXT, updated_at INTEGER,
+                weknora_doc_id TEXT, metrics_json TEXT NOT NULL DEFAULT '{}')""")
+            database.execute("""CREATE TABLE group_files(
+                group_id TEXT NOT NULL, sha256 TEXT NOT NULL,
+                source_path TEXT NOT NULL)""")
+            database.execute(
+                "INSERT INTO files(sha256,source_path,state,metrics_json) "
+                "VALUES(?,?,?,?)",
+                (digest, str(source), "verified", "{}"),
+            )
+            database.execute(
+                "INSERT INTO group_files(group_id,sha256,source_path) VALUES(?,?,?)",
+                ("group-1", digest, str(source)),
+            )
+            errors = ingest.cleanup_verified_sources(
+                [source],
+                canonical,
+                "parent-doc",
+                "group-1",
+                {"cleanup": {"permanently_delete_source_after_search": False}},
+                database,
+            )
+            row = database.execute(
+                "SELECT state,error FROM files WHERE sha256=?", (digest,)
+            ).fetchone()
+            self.assertEqual(errors, [])
+            self.assertTrue(source.is_file())
+            self.assertEqual(row["state"], "completed")
+            self.assertEqual(row["error"], "")
+            database.close()
+
+    def test_group_manifest_digest_wins_over_replaced_path_content(self) -> None:
+        """Cleanup must bind to the bytes parsed for the group, not new bytes."""
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source.pdf"
+            source.write_bytes(b"new replacement bytes")
+            old_digest = "a" * 64
+            database = sqlite3.connect(":memory:")
+            database.row_factory = sqlite3.Row
+            database.execute("""CREATE TABLE group_files(
+                group_id TEXT NOT NULL, sha256 TEXT NOT NULL,
+                source_path TEXT NOT NULL)""")
+            database.execute(
+                "INSERT INTO group_files(group_id,sha256,source_path) VALUES(?,?,?)",
+                ("group-1", old_digest, str(source)),
+            )
+            self.assertEqual(
+                ingest.recorded_source_digest(database, source, "group-1"),
+                old_digest,
+            )
+            database.close()
+
+    def test_replaced_terminal_path_becomes_a_processing_candidate(self) -> None:
+        """A completed path whose bytes changed must not be skipped forever."""
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            inbox = Path(temporary) / "inbox"
+            inbox.mkdir()
+            source = inbox / "source.txt"
+            source.write_text("new content", encoding="utf-8")
+            database = sqlite3.connect(":memory:")
+            database.row_factory = sqlite3.Row
+            database.execute("""CREATE TABLE files(
+                sha256 TEXT PRIMARY KEY, source_path TEXT, batch_id TEXT,
+                state TEXT, markdown_path TEXT, error TEXT, updated_at INTEGER,
+                weknora_doc_id TEXT, metrics_json TEXT NOT NULL DEFAULT '{}')""")
+            database.execute(
+                """INSERT INTO files(
+                    sha256,source_path,state,error,updated_at,metrics_json
+                ) VALUES(?,?,?,?,?,?)""",
+                ("b" * 64, str(source), "completed", "", 1, "{}"),
+            )
+            candidates = ingest.processing_candidates(
+                {"folders": {"inbox": inbox}}, database
+            )
+            self.assertEqual(candidates, [source])
+            database.close()
+
+    def test_classification_migration_preserves_other_source_by_default(self) -> None:
+        """Classification migration must honor the default no-delete policy."""
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            source = work / "source.pdf"
+            old_markdown = work / "old.md"
+            destination = work / "classified"
+            scratch = work / "scratch"
+            source.write_bytes(b"source bytes")
+            old_markdown.write_text(
+                "# Question 1\n\n**题目**\n\nBody\n",
+                encoding="utf-8",
+            )
+            digest = ingest.sha256(source)
+            with mock.patch.object(ingest, "ROOT", work):
+                database = ingest.db_open()
+            database.execute(
+                """INSERT INTO files(
+                    sha256,source_path,state,markdown_path,error,updated_at,
+                    metrics_json
+                ) VALUES(?,?,?,?,?,?,?)""",
+                (digest, str(source), "completed", str(old_markdown), "", 1, "{}"),
+            )
+            database.execute(
+                """INSERT INTO groups(
+                    group_id,group_name,state,markdown_path,error,updated_at,
+                    classification_json
+                ) VALUES(?,?,?,?,?,?,?)""",
+                ("group-1", "Other", "completed", str(old_markdown), "", 1, "{}"),
+            )
+            database.execute(
+                "INSERT INTO group_files(group_id,sha256,source_path) VALUES(?,?,?)",
+                ("group-1", digest, str(source)),
+            )
+            database.commit()
+            classification = ingest.DocumentClassification(
+                "其他资料",
+                "未知机构",
+                "综合",
+                ("综合",),
+                "rule",
+                0.99,
+                ("test evidence",),
+                1,
+            )
+            config = {
+                "folders": {"markdown": work, "work": scratch},
+                "document_classification": {
+                    "taxonomy": {"version": 1},
+                    "version": 1,
+                    "delete_other_source_after_markdown": False,
+                },
+                "pairing": {"child_chars": 384},
+                "cleanup": {"delete_temporary_files": True},
+                "weknora": {
+                    "parent_knowledge_base": "parent-kb",
+                    "child_knowledge_base": "child-kb",
+                },
+            }
+            try:
+                with (
+                    mock.patch.object(
+                        ingest,
+                        "classify_group",
+                        return_value=classification,
+                    ),
+                    mock.patch.object(
+                        ingest,
+                        "classification_directory",
+                        return_value=destination,
+                    ),
+                    mock.patch.dict(
+                        os.environ,
+                        {"QUESTION_BANK_ALLOW_PERMANENT_DELETE": ""},
+                    ),
+                ):
+                    ingest.migrate_classified_markdown(
+                        config,
+                        database,
+                        dry_run=False,
+                        delete_old_indexes=False,
+                    )
+                file_row = database.execute(
+                    "SELECT state FROM files WHERE sha256=?", (digest,)
+                ).fetchone()
+                self.assertTrue(source.is_file())
+                self.assertEqual(file_row["state"], "excluded_completed")
+                self.assertEqual(
+                    database.execute(
+                        "SELECT COUNT(*) FROM deletion_audit"
+                    ).fetchone()[0],
+                    0,
+                )
+            finally:
+                database.close()
 
     def test_archive_status_matches_retention_policy(self) -> None:
         source = (ROOT / "ingest.py").read_text("utf-8")
         self.assertIn("压缩包已展开并永久删除原包", source)
         self.assertIn("压缩包已展开，原包已移至archives保留", source)
 
+    def test_ambiguous_typescript_suffix_is_not_treated_as_video(self) -> None:
+        config = yaml.safe_load((ROOT / "config.example.yaml").read_text("utf-8"))
+        self.assertNotIn(".ts", config["classification"]["video_extensions"])
+
+    def test_archive_directory_paths_are_validated_before_extraction(self) -> None:
+        import ingest
+
+        result = subprocess.CompletedProcess(
+            args=["7z"],
+            returncode=0,
+            stdout="Path = ../outside\nSize = 0\nFolder = +\n\n",
+            stderr="",
+        )
+        config = {
+            "archive_executable": Path("7z"),
+            "max_archive_files": 10,
+            "max_expanded_gb": 1,
+        }
+        with mock.patch.object(ingest.subprocess, "run", return_value=result):
+            with self.assertRaisesRegex(RuntimeError, "异常路径"):
+                ingest.archive_inventory(Path("sample.zip"), config)
+
+    def test_plain_document_does_not_require_7zip(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inbox = root / "inbox"
+            inbox.mkdir()
+            (inbox / "sample.pdf").write_bytes(b"not parsed in classification")
+            config = {
+                "folders": {
+                    "inbox": inbox,
+                    "failed": root / "failed",
+                    "work": root / "work",
+                },
+                "classification": {
+                    "archive_executable": root / "missing-7z.exe",
+                    "archive_extensions": [".zip"],
+                    "video_extensions": [".mp4"],
+                    "transient_extensions": [".part"],
+                    "archive_store": root / "archives",
+                    "unsupported_to_failed": True,
+                    "delete_videos": False,
+                },
+            }
+            for folder in ("failed", "work", "archives"):
+                (root / folder).mkdir()
+            stats = ingest.classify_inbox(config)
+            self.assertEqual(stats.supported_files, 1)
+
     def test_retrieval_only_defaults(self) -> None:
         config = yaml.safe_load((ROOT / "config.example.yaml").read_text("utf-8"))
-        self.assertEqual(
-            config["weknora"]["features"],
-            {"summaries": False, "wiki": False, "graph": False},
-        )
+        self.assertNotIn("features", config["weknora"])
+        self.assertNotIn("rerank", config["weknora"]["models"])
+        self.assertNotIn("embedding_parallel", config["weknora"])
         self.assertEqual(
             config["mcp_public"]["external_url"],
             "https://mcp.example.com",
@@ -462,6 +775,231 @@ class PublicTemplateTests(unittest.TestCase):
                     "0.12.2",
                     str(relative_path),
                 )
+
+    def test_duplicate_mineru_part_result_is_rejected(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            first = ingest.SourcePart(work / "book.part-1-10.pdf", 0)
+            second = ingest.SourcePart(work / "book.part-11-20.pdf", 10)
+            first.path.write_bytes(b"first part")
+            second.path.write_bytes(b"second part")
+            duplicate_id = ingest.part_data_id(first)
+            items = [
+                {"data_id": duplicate_id, "full_zip_url": "https://one.invalid"},
+                {"data_id": duplicate_id, "full_zip_url": "https://two.invalid"},
+            ]
+
+            def create_result(_url: str, target: Path) -> None:
+                with zipfile.ZipFile(target, "w") as archive:
+                    archive.writestr("full.md", "# first")
+
+            with mock.patch.object(
+                ingest, "download_mineru_zip", side_effect=create_result
+            ) as downloader:
+                with self.assertRaisesRegex(RuntimeError, "重复分卷"):
+                    ingest.download_results(items, [first, second], work)
+            self.assertEqual(downloader.call_count, 1)
+
+    def test_mineru_result_zip_rejects_unsafe_paths(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            archive_path = Path(temporary) / "unsafe.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("../outside.md", "unsafe")
+            with self.assertRaisesRegex(RuntimeError, "不安全路径"):
+                ingest.validate_mineru_zip(archive_path)
+
+    def test_mimo_disabled_prevents_classification_network_call(self) -> None:
+        import ingest
+
+        rule = ingest.DocumentClassification(
+            "待分类", "未知机构", "综合", ("综合",), "rule", 0.2, (), 1
+        )
+        cfg = {
+            "document_classification": {
+                "taxonomy": {"version": 1},
+                "other_min_confidence": 0.9,
+            },
+            "ollama": {"mimo": {"enabled": False}},
+        }
+        with mock.patch.object(
+            ingest,
+            "rule_classification",
+            return_value=(rule, True, {}, []),
+        ), mock.patch.object(ingest, "mimo_classification") as remote:
+            result = ingest.classify_group("uncertain", [], cfg)
+        self.assertEqual(result, rule)
+        remote.assert_not_called()
+
+    def test_transient_cloud_failures_stay_retryable(self) -> None:
+        import ingest
+
+        self.assertTrue(ingest.is_retryable_parse_error("503 Service Unavailable"))
+        self.assertTrue(
+            ingest.is_retryable_parse_error(
+                "MiMo全部已配置Key暂不可用: HTTP 429 Too Many Requests"
+            )
+        )
+        self.assertFalse(
+            ingest.is_permanent_source_parse_error("unexpected internal service error")
+        )
+
+    def test_existing_document_reuse_always_validates_content_and_kb(self) -> None:
+        source = (ROOT / "ingest.py").read_text("utf-8")
+        fragment = source[
+            source.index("def weknora_find_existing(") : source.index(
+                "def weknora_document("
+            )
+        ]
+        self.assertNotIn(
+            "if not layer and not group_id and classification is None", fragment
+        )
+        self.assertIn("remote_hash =", fragment)
+        self.assertIn("actual_kb =", fragment)
+
+    def test_verification_cannot_borrow_another_documents_hit(self) -> None:
+        source = (ROOT / "ingest.py").read_text("utf-8")
+        fragment = source[
+            source.index("def weknora_verify(") : source.index(
+                "def full_route_check_due("
+            )
+        ]
+        self.assertNotIn("route_has_hits", fragment)
+        self.assertIn("拒绝把其他文档的命中当作成功", fragment)
+
+    def test_normal_mode_preflights_before_mineru_submission(self) -> None:
+        source = (ROOT / "ingest.py").read_text("utf-8")
+        main_fragment = source[source.index("def main(") :]
+        self.assertLess(
+            main_fragment.index("preflight(cfg, db)"),
+            main_fragment.index("prequeue_all_mineru(prequeue_needed"),
+        )
+
+    def test_equal_byte_sources_fail_safely_instead_of_sharing_state(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            first = work / "first.pdf"
+            second = work / "second.pdf"
+            first.write_bytes(b"identical")
+            second.write_bytes(b"identical")
+            digest = ingest.sha256(first)
+            database = sqlite3.connect(":memory:")
+            database.row_factory = sqlite3.Row
+            database.execute(
+                "CREATE TABLE files(sha256 TEXT PRIMARY KEY, source_path TEXT NOT NULL)"
+            )
+            database.execute(
+                "INSERT INTO files(sha256,source_path) VALUES(?,?)",
+                (digest, str(first)),
+            )
+            with self.assertRaisesRegex(RuntimeError, "不能安全并发追踪"):
+                ingest.reject_active_duplicate_source_instances(
+                    database, [second], {second: digest}
+                )
+            database.close()
+
+    def test_public_mcp_requires_exact_three_layer_allowlist(self) -> None:
+        start = (ROOT / "mcp-public" / "start.ps1").read_text("utf-8")
+        self.assertIn("UnexpectedKnowledgeBaseIds", start)
+        self.assertIn("outside the configured three layers", start)
+        self.assertIn("foreach ($KnowledgeBaseId in $UniqueExpectedIds)", start)
+        self.assertIn("returned no retrieval result", start)
+
+    def test_cloudflare_ingress_and_orphan_processes_are_fail_closed(self) -> None:
+        start = (ROOT / "mcp-public" / "start-cloudflare.ps1").read_text(
+            "utf-8"
+        )
+        stop = (ROOT / "mcp-public" / "stop.ps1").read_text("utf-8")
+        self.assertIn("$ServiceMatches.Count -ne 2", start)
+        self.assertIn('"http://127.0.0.1:18081"', start)
+        self.assertIn('"http_status:404"', start)
+        self.assertIn("untracked or duplicate cloudflared", start)
+        self.assertIn("Get-CimInstance Win32_Process", stop)
+        self.assertIn("Stop-ProcessTree", stop)
+        self.assertIn("[Threading.Mutex]::new", start)
+
+    def test_stack_start_is_serialized_and_does_not_adopt_unrelated_wsl(self) -> None:
+        start = (ROOT / "scripts" / "start.ps1").read_text("utf-8")
+        stop = (ROOT / "scripts" / "stop.ps1").read_text("utf-8")
+        self.assertIn("QuestionBank-$MutexDigest-StackStart", start)
+        self.assertIn("$SharedWslPath", start)
+        self.assertIn("if (-not (Test-Path $PidFile)) { return $null }", start)
+        self.assertIn("[regex]::Escape($IngestScript)", start)
+        self.assertIn("[regex]::Escape($IngestScript)", stop)
+
+    def test_weknora_images_and_pdf_security_floor_are_pinned(self) -> None:
+        bootstrap = (ROOT / "scripts" / "bootstrap.ps1").read_text("utf-8")
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))
+        self.assertIn(
+            'Set-DotEnvValue $WeKnoraEnv "WEKNORA_VERSION" $WeKnoraVersion',
+            bootstrap,
+        )
+        self.assertIn("pypdf>=6.15.0", project["project"]["dependencies"])
+        self.assertIn('Join-Path $WeKnora "docker-compose.override.yml"', bootstrap)
+        self.assertEqual(bootstrap.count("restart: unless-stopped"), 2)
+
+    def test_manual_deletion_snapshot_cannot_delete_replacement_bytes(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            folders = {
+                name: work / name
+                for name in ("inbox", "failed", "markdown", "work")
+            }
+            for folder in folders.values():
+                folder.mkdir(parents=True)
+            source = folders["inbox"] / "source.pdf"
+            canonical = folders["markdown"] / "source.md"
+            source.write_bytes(b"old bytes")
+            canonical.write_text("# retained", encoding="utf-8")
+            old_digest = ingest.sha256(source)
+            with mock.patch.object(ingest, "ROOT", work):
+                database = ingest.db_open()
+            old_time = int(time.time()) - 120
+            database.execute(
+                """INSERT INTO files(
+                    sha256,source_path,state,error,updated_at,metrics_json
+                ) VALUES(?,?,?,?,?,?)""",
+                (old_digest, str(source), "completed", "", old_time, "{}"),
+            )
+            database.execute(
+                """INSERT INTO groups(
+                    group_id,group_name,state,markdown_path,updated_at
+                ) VALUES(?,?,?,?,?)""",
+                ("group-1", "group-1", "completed", str(canonical), old_time),
+            )
+            database.execute(
+                "INSERT INTO group_files(group_id,sha256,source_path) VALUES(?,?,?)",
+                ("group-1", old_digest, str(source)),
+            )
+            database.commit()
+            source.unlink()
+            selection = folders["work"] / "selection.json"
+            cfg = {
+                "folders": folders,
+                "cleanup": {"permanently_delete_source_after_search": False},
+            }
+            detected = ingest.detect_manual_deletions(
+                cfg, database, selection, grace_seconds=0
+            )
+            self.assertEqual(detected["affected_groups"], 1)
+            source.write_bytes(b"new replacement bytes")
+            with mock.patch.dict(
+                os.environ,
+                {"QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC": "I_UNDERSTAND"},
+            ):
+                with self.assertRaisesRegex(RuntimeError, "已恢复或被替换"):
+                    ingest.sync_manual_deletions(
+                        cfg, database, selection, dry_run=False
+                    )
+            self.assertEqual(source.read_bytes(), b"new replacement bytes")
+            database.close()
 
 
 if __name__ == "__main__":
