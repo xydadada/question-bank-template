@@ -68,7 +68,12 @@ foreach ($File in $Files) {
         $Failures.Add("sensitive file type is publishable: $Relative")
     }
     if ($File.Extension.ToLowerInvariant() -notin $TextExtensions) { continue }
-    $Text = Get-Content -Raw -LiteralPath $File.FullName -ErrorAction SilentlyContinue
+    try {
+        $Text = [IO.File]::ReadAllText($File.FullName, [Text.Encoding]::UTF8)
+    } catch {
+        $Failures.Add("could not read publishable text as UTF-8: $Relative")
+        continue
+    }
     Test-PublishableText $Relative $Text "working tree"
 }
 
@@ -80,12 +85,18 @@ foreach ($File in $Unexpected) {
     $Failures.Add("private/generated artifact present: $($File.FullName.Substring($Root.Length + 1))")
 }
 
-$Config = Get-Content -Raw (Join-Path $Root "config.example.yaml")
+$Config = [IO.File]::ReadAllText(
+    (Join-Path $Root "config.example.yaml"),
+    [Text.Encoding]::UTF8
+)
 foreach ($Unsafe in "delete_videos: true", "delete_archives_after_extract: true", "delete_other_source_after_markdown: true", "permanently_delete_source_after_search: true") {
     if ($Config.Contains($Unsafe)) { $Failures.Add("unsafe example default: $Unsafe") }
 }
 
-$Project = Get-Content -Raw (Join-Path $Root "pyproject.toml")
+$Project = [IO.File]::ReadAllText(
+    (Join-Path $Root "pyproject.toml"),
+    [Text.Encoding]::UTF8
+)
 if ($Project -match '(?im)^\s*"pymupdf(?:\[[^]]+])?\s*[<>=!~]') {
     $Failures.Add("AGPL PyMuPDF dependency is not permitted in the MIT template")
 }
@@ -100,7 +111,10 @@ foreach ($Script in $Files | Where-Object { $_.Extension -eq ".ps1" }) {
 }
 
 foreach ($Workflow in $Files | Where-Object { $_.FullName -match '[\\/]\.github[\\/]workflows[\\/].+\.ya?ml$' }) {
-    $WorkflowText = Get-Content -Raw -LiteralPath $Workflow.FullName
+    $WorkflowText = [IO.File]::ReadAllText(
+        $Workflow.FullName,
+        [Text.Encoding]::UTF8
+    )
     $WorkflowLines = @($WorkflowText -split '\r?\n')
     if ($WorkflowText -match '(?m)^\s*pull_request_target\s*:') {
         $Failures.Add("dangerous pull_request_target trigger: $($Workflow.Name)")

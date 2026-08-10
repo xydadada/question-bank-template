@@ -7,7 +7,8 @@ $Cli = Join-Path $Root "bin\weknora.exe"
 $RuntimeProfile = "local"
 $LocalConfig = Join-Path $Root "config.local.yaml"
 if (Test-Path $LocalConfig) {
-    $ProfileMatch = [regex]::Match((Get-Content -Raw -LiteralPath $LocalConfig), '(?m)^  profile:\s*["'']?([^\s#"'']+)')
+    $ConfigText = [IO.File]::ReadAllText($LocalConfig, [Text.Encoding]::UTF8)
+    $ProfileMatch = [regex]::Match($ConfigText, '(?m)^  profile:\s*["'']?([^\s#"'']+)')
     if ($ProfileMatch.Success) { $RuntimeProfile = $ProfileMatch.Groups[1].Value }
 }
 

@@ -93,16 +93,57 @@ function Wait-Http([string]$Name, [string]$Uri, [int]$TimeoutSeconds = 90) {
     throw "$Name did not become ready within $TimeoutSeconds seconds: $Uri"
 }
 
+function Stop-ProcessTree([int]$RootProcessId, [int]$TimeoutSeconds = 15) {
+    $Known = [Collections.Generic.HashSet[int]]::new()
+    $Known.Add($RootProcessId) | Out-Null
+    $Discover = {
+        param($Rows, $KnownIds)
+        $Changed = $true
+        while ($Changed) {
+            $Changed = $false
+            foreach ($Child in $Rows) {
+                if ($KnownIds.Contains([int]$Child.ParentProcessId) -and
+                    -not $KnownIds.Contains([int]$Child.ProcessId)) {
+                    $KnownIds.Add([int]$Child.ProcessId) | Out-Null
+                    $Changed = $true
+                }
+            }
+        }
+    }
+    $Rows = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    & $Discover $Rows $Known
+    # Stop the supervisor first so it cannot replace a worker while the
+    # descendants are being collected and terminated.
+    Stop-Process -Id $RootProcessId -Force -ErrorAction SilentlyContinue
+    $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $Rows = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+        & $Discover $Rows $Known
+        $Remaining = @($Rows | Where-Object {
+            $Known.Contains([int]$_.ProcessId)
+        })
+        foreach ($ProcessRow in $Remaining) {
+            Stop-Process -Id $ProcessRow.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Milliseconds 250
+        $Rows = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+        & $Discover $Rows $Known
+        $Remaining = @($Rows | Where-Object {
+            $Known.Contains([int]$_.ProcessId)
+        })
+        if (-not $Remaining.Count) { return }
+    } while ([DateTime]::UtcNow -lt $Deadline)
+    $RemainingIds = @($Remaining | ForEach-Object { $_.ProcessId })
+    throw "Process tree still has running PIDs: $($RemainingIds -join ', ')"
+}
+
 function Stop-RollbackProcess([string]$PidFile, [string]$ExpectedExecutable, [string]$Pattern) {
     $Row = Get-ManagedProcess $PidFile $ExpectedExecutable $Pattern
     if (-not $Row) { return }
-    Stop-Process -Id $Row.ProcessId -ErrorAction SilentlyContinue
-    $Deadline = [DateTime]::UtcNow.AddSeconds(10)
-    while ((Get-Process -Id $Row.ProcessId -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $Deadline) {
-        Start-Sleep -Milliseconds 250
-    }
-    if (Get-Process -Id $Row.ProcessId -ErrorAction SilentlyContinue) {
-        Write-Warning "Rollback could not stop PID $($Row.ProcessId); its PID file was retained."
+    try {
+        Stop-ProcessTree ([int]$Row.ProcessId)
+    } catch {
+        Write-Warning "Rollback could not stop PID $($Row.ProcessId) and its descendants; its PID file was retained: $($_.Exception.Message)"
         return
     }
     Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue

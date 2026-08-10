@@ -22,7 +22,7 @@ Check (Test-Path (Join-Path $Root ".env")) ".env exists" ".env missing; run boot
 $Config = Join-Path $Root "config.local.yaml"
 Check (Test-Path $Config) "config.local.yaml exists" "config.local.yaml missing; run bootstrap"
 if (Test-Path $Config) {
-    $Text = Get-Content -Raw $Config
+    $Text = [IO.File]::ReadAllText($Config, [Text.Encoding]::UTF8)
     Check ($Text -notmatch '__[A-Z]+_KB_ID__') "knowledge-base IDs configured" "knowledge-base IDs still contain placeholders"
 }
 
@@ -37,7 +37,8 @@ if (Test-Path $Python) {
 if (Test-Path $Cli) {
     $RuntimeProfile = "local"
     if (Test-Path $Config) {
-        $ProfileMatch = [regex]::Match((Get-Content -Raw -LiteralPath $Config), '(?m)^  profile:\s*["'']?([^\s#"'']+)')
+        $ConfigText = [IO.File]::ReadAllText($Config, [Text.Encoding]::UTF8)
+        $ProfileMatch = [regex]::Match($ConfigText, '(?m)^  profile:\s*["'']?([^\s#"'']+)')
         if ($ProfileMatch.Success) { $RuntimeProfile = $ProfileMatch.Groups[1].Value }
     }
     & $Cli doctor --format json --profile $RuntimeProfile
@@ -46,7 +47,8 @@ if (Test-Path $Cli) {
     $Failures.Add("WeKnora CLI missing; run bootstrap")
 }
 
-$EnvText = if (Test-Path (Join-Path $Root ".env")) { Get-Content -Raw (Join-Path $Root ".env") } else { "" }
+$EnvPath = Join-Path $Root ".env"
+$EnvText = if (Test-Path $EnvPath) { [IO.File]::ReadAllText($EnvPath, [Text.Encoding]::UTF8) } else { "" }
 $HasMineru = $EnvText -match '(?m)^MINERU_API_TOKEN(?:_[A-Z0-9]+)?\s*=\s*[^\s#]+\s*$'
 $HasMimo = $EnvText -match '(?m)^MIMO_API_KEY(?:_[0-9]+)?\s*=\s*[^\s#]+\s*$'
 if ($HasMineru) { Write-Host "[OK] at least one MinerU key is present (value hidden)" } else { Write-Host "[WARN] no MinerU key detected; ingestion is unavailable, but existing knowledge-base retrieval can still work" }
