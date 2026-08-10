@@ -1061,6 +1061,88 @@ class PublicTemplateTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "不安全路径"):
                 ingest.validate_mineru_zip(archive_path)
 
+    def test_recovered_mineru_results_reject_duplicates_before_download(self) -> None:
+        import ingest
+
+        items = [
+            {
+                "data_id": "duplicate-id",
+                "file_name": "book.part-1-100.pdf",
+                "full_zip_url": "https://example.invalid/one.zip",
+            },
+            {
+                "data_id": "duplicate-id",
+                "file_name": "book.part-101-200.pdf",
+                "full_zip_url": "https://example.invalid/two.zip",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            ingest, "download_mineru_zip"
+        ) as download:
+            with self.assertRaisesRegex(RuntimeError, "重复任务"):
+                ingest.download_recovered_results(
+                    items,
+                    Path(temporary) / "book.pdf",
+                    Path(temporary),
+                )
+        download.assert_not_called()
+
+    def test_mineru_batch_response_is_validated_before_persisting(self) -> None:
+        import ingest
+
+        response = mock.Mock()
+        response.status_code = 200
+        response.json.return_value = {
+            "code": 0,
+            "data": {"batch_id": "batch-1", "file_urls": []},
+        }
+        response.raise_for_status.return_value = None
+        persisted = mock.Mock()
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "sample.pdf"
+            source.write_bytes(b"pdf")
+            part = ingest.SourcePart(source, 0)
+            with mock.patch.object(ingest.requests, "post", return_value=response):
+                with self.assertRaisesRegex(RuntimeError, "上传地址数量或格式"):
+                    ingest.mineru_submit(
+                        [part],
+                        {"primary": "placeholder-value"},
+                        {
+                            "base_url": "https://mineru.example.invalid",
+                            "model_version": "vlm",
+                            "language": "ch",
+                        },
+                        on_batch_created=persisted,
+                        preferred_slot="primary",
+                    )
+        persisted.assert_not_called()
+
+    def test_recovered_mineru_results_reject_duplicate_explicit_page_ranges(self) -> None:
+        import ingest
+
+        items = [
+            {
+                "data_id": "first",
+                "file_name": "book.part-1-100.pdf",
+                "full_zip_url": "https://example.invalid/one.zip",
+            },
+            {
+                "data_id": "second",
+                "file_name": "book.part-1-100.pdf",
+                "full_zip_url": "https://example.invalid/two.zip",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            ingest, "download_mineru_zip"
+        ) as download:
+            with self.assertRaisesRegex(RuntimeError, "重复分卷起始页"):
+                ingest.download_recovered_results(
+                    items,
+                    Path(temporary) / "book.pdf",
+                    Path(temporary),
+                )
+        download.assert_not_called()
+
     def test_mimo_disabled_prevents_classification_network_call(self) -> None:
         import ingest
 
@@ -1118,6 +1200,58 @@ class PublicTemplateTests(unittest.TestCase):
         ]
         self.assertNotIn("route_has_hits", fragment)
         self.assertIn("拒绝把其他文档的命中当作成功", fragment)
+
+    def test_verification_rejects_remote_hash_or_kb_mismatch(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            markdown = root / "document.md"
+            source = root / "source.pdf"
+            markdown.write_text("# unique content\n", encoding="utf-8")
+            source.write_bytes(b"pdf")
+            cfg = {
+                "knowledge_base": "expected-kb",
+                "profile": "test",
+                "upload_command": ["weknora"],
+                "wait_command": ["wait"],
+                "search_command": ["search", "{query}"],
+                "verification_limit": 50,
+            }
+
+            def mismatched_hash(command, values, cwd, timeout_seconds=600, api_key=None):
+                if command[1:3] == ["doc", "view"]:
+                    return {
+                        "data": {
+                            "parse_status": "completed",
+                            "file_hash": "wrong",
+                            "knowledge_base_id": "expected-kb",
+                        }
+                    }
+                raise AssertionError(f"unexpected command after failed hash: {command}")
+
+            with mock.patch.object(ingest, "run_command", side_effect=mismatched_hash):
+                with self.assertRaisesRegex(RuntimeError, "内容摘要"):
+                    ingest.weknora_verify(
+                        markdown, source, cfg, "doc-1", wait=False
+                    )
+
+            def mismatched_kb(command, values, cwd, timeout_seconds=600, api_key=None):
+                if command[1:3] == ["doc", "view"]:
+                    return {
+                        "data": {
+                            "parse_status": "completed",
+                            "file_hash": ingest.md5_digest(markdown),
+                            "knowledge_base_id": "other-kb",
+                        }
+                    }
+                raise AssertionError(f"unexpected command after failed kb: {command}")
+
+            with mock.patch.object(ingest, "run_command", side_effect=mismatched_kb):
+                with self.assertRaisesRegex(RuntimeError, "知识库归属"):
+                    ingest.weknora_verify(
+                        markdown, source, cfg, "doc-1", wait=False
+                    )
 
     def test_normal_mode_preflights_before_mineru_submission(self) -> None:
         source = (ROOT / "ingest.py").read_text("utf-8")
