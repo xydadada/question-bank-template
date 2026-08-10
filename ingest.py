@@ -2140,6 +2140,19 @@ def mineru_create_batch(
         response.raise_for_status()
         if not result or result.get("code") != 0:
             raise RuntimeError(f"MinerU提交失败: {result}")
+        data = result.get("data") or {}
+        batch_id = str(data.get("batch_id") or "").strip()
+        urls = data.get("file_urls")
+        if not batch_id:
+            raise RuntimeError("MinerU提交响应缺少batch_id，拒绝记录不可恢复任务")
+        if (
+            not isinstance(urls, list)
+            or len(urls) != len(group)
+            or any(not isinstance(url, str) or not url.strip() for url in urls)
+        ):
+            raise RuntimeError(
+                "MinerU提交响应的上传地址数量或格式不正确，拒绝记录不完整任务"
+            )
         return result, slot
     raise RuntimeError(f"所有MinerU Key都无法提交任务: {last_error}")
 
@@ -2159,11 +2172,12 @@ def mineru_submit(
         result, slot = mineru_create_batch(
             group, tokens, cfg, preferred_slot
         )
-        batch = MinerUBatch(result["data"]["batch_id"], slot)
+        data = result["data"]
+        batch = MinerUBatch(str(data["batch_id"]), slot)
         batches.append(batch)
         if on_batch_created:
             on_batch_created(batch)
-        urls = result["data"]["file_urls"]
+        urls = data["file_urls"]
         for part, url in zip(group, urls, strict=True):
             with part.path.open("rb") as f:
                 upload = requests.put(url, data=f, timeout=600)
@@ -2450,8 +2464,31 @@ def download_recovered_results(
     job: Path,
 ) -> list[tuple[SourcePart, Path]]:
     """Download completed MinerU output when the historical source is missing."""
-    markdowns = []
+    mapped_items: list[tuple[dict, int]] = []
+    seen_identities: set[str] = set()
+    seen_explicit_start_pages: set[int] = set()
     for index, item in enumerate(items, 1):
+        data_id = str(item.get("data_id") or "").strip()
+        file_name = str(item.get("file_name") or original_source.name)
+        result_url = str(item.get("full_zip_url") or "").strip()
+        if not result_url:
+            raise RuntimeError(f"MinerU恢复结果缺少下载地址: {item}")
+        identity = f"data_id:{data_id}" if data_id else f"file_name:{file_name}"
+        if identity in seen_identities:
+            raise RuntimeError(f"MinerU恢复结果包含重复任务: {identity}")
+        seen_identities.add(identity)
+        page_match = re.search(r"\.part-(\d+)-\d+\.pdf$", file_name, re.I)
+        start_page = max(0, int(page_match.group(1)) - 1) if page_match else index - 1
+        if page_match and start_page in seen_explicit_start_pages:
+            raise RuntimeError(
+                f"MinerU恢复结果包含重复分卷起始页: {start_page + 1}"
+            )
+        if page_match:
+            seen_explicit_start_pages.add(start_page)
+        mapped_items.append((item, start_page))
+
+    markdowns = []
+    for index, (item, start_page) in enumerate(mapped_items, 1):
         archive = job / f"recovered-result-{index}.zip"
         download_mineru_zip(item["full_zip_url"], archive)
         out = job / f"recovered-result-{index}"
@@ -2461,9 +2498,6 @@ def download_recovered_results(
             raise RuntimeError(
                 f"MinerU恢复结果必须且只能包含一个full.md: {archive}"
             )
-        file_name = str(item.get("file_name") or original_source.name)
-        page_match = re.search(r"\.part-(\d+)-\d+\.pdf$", file_name, re.I)
-        start_page = max(0, int(page_match.group(1)) - 1) if page_match else index - 1
         markdowns.append((SourcePart(original_source, start_page), found[0]))
     return sorted(markdowns, key=lambda pair: pair[0].start_page)
 
@@ -6532,6 +6566,18 @@ def weknora_verify(
     if document.get("parse_status") != "completed":
         raise RuntimeError(
             f"WeKnora文档状态尚未完成: {document.get('parse_status')}"
+        )
+    expected_hash = md5_digest(md_path)
+    remote_hash = str(document.get("file_hash") or "").casefold()
+    if not remote_hash or remote_hash != expected_hash:
+        raise RuntimeError(
+            "WeKnora目标文档内容摘要缺失或不匹配，拒绝把陈旧文档当作验收成功"
+        )
+    expected_kb = str(knowledge_base or cfg["knowledge_base"])
+    actual_kb = str(document.get("knowledge_base_id") or "")
+    if not actual_kb or actual_kb != expected_kb:
+        raise RuntimeError(
+            "WeKnora目标文档知识库归属缺失或不匹配，拒绝跨库验收"
         )
     chunks = run_command(
         [
