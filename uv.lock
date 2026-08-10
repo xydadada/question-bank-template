@@ -660,7 +660,7 @@ wheels = [
 
 [[package]]
 name = "question-bank-ingest"
-version = "0.1.8"
+version = "0.1.9"
 source = { virtual = "." }
 dependencies = [
     { name = "bcrypt" },

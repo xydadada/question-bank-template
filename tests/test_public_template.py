@@ -1,4 +1,5 @@
 import ast
+import io
 import os
 import re
 import sqlite3
@@ -149,6 +150,65 @@ class PublicTemplateTests(unittest.TestCase):
                 0,
             )
             database.close()
+
+    def test_pending_deletion_audit_is_reconciled_without_redeleting(self) -> None:
+        """Startup recovery records the observed outcome of an interrupted delete."""
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            retained = root / "retained.md"
+            retained.write_text("# Retained\n\nBody\n", encoding="utf-8")
+            missing_source = root / "already-deleted.pdf"
+            existing_source = root / "not-deleted.pdf"
+            existing_source.write_bytes(b"still here")
+            with mock.patch.object(ingest, "ROOT", root):
+                database = ingest.db_open()
+            retained_digest = ingest.stable_sha256(retained)
+            now = int(time.time())
+            database.executemany(
+                """INSERT INTO deletion_audit(
+                    source_path,sha256,group_id,reason,markdown_path,
+                    markdown_sha256,requested_at,success,error
+                ) VALUES(?,?,?,?,?,?,?,0,'')""",
+                [
+                    (
+                        str(missing_source),
+                        "a" * 64,
+                        "group-1",
+                        "test",
+                        str(retained),
+                        retained_digest,
+                        now,
+                    ),
+                    (
+                        str(existing_source),
+                        ingest.sha256(existing_source),
+                        "group-2",
+                        "test",
+                        str(retained),
+                        retained_digest,
+                        now,
+                    ),
+                ],
+            )
+            database.commit()
+            try:
+                result = ingest.reconcile_pending_deletion_audits(database)
+                rows = database.execute(
+                    "SELECT source_path,success,completed_at,error "
+                    "FROM deletion_audit ORDER BY id"
+                ).fetchall()
+                self.assertEqual(result["confirmed_missing"], 1)
+                self.assertEqual(result["not_deleted"], 1)
+                self.assertEqual(rows[0]["success"], 1)
+                self.assertIsNotNone(rows[0]["completed_at"])
+                self.assertIn("已不存在", rows[0]["error"])
+                self.assertEqual(rows[1]["success"], 0)
+                self.assertIsNotNone(rows[1]["completed_at"])
+                self.assertTrue(existing_source.is_file())
+            finally:
+                database.close()
 
     def test_cleanup_marks_completed_when_source_retention_is_configured(self) -> None:
         """Retention mode must not enqueue an endless deletion retry loop."""
@@ -344,6 +404,148 @@ class PublicTemplateTests(unittest.TestCase):
             finally:
                 database.close()
 
+    def test_classification_move_journal_recovers_after_interrupted_replace(self) -> None:
+        """A crash after os.replace must not orphan the group's Markdown path."""
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            markdown_root = root / "markdown"
+            scratch = root / "work"
+            old_path = markdown_root / "old.md"
+            target = markdown_root / "试卷" / "target.md"
+            markdown_root.mkdir()
+            target.parent.mkdir(parents=True)
+            old_path.write_text(
+                "# Question 1\n\n**题目**\n\nBody\n",
+                encoding="utf-8",
+            )
+            classification = ingest.DocumentClassification(
+                "试卷",
+                "未知机构",
+                "力学",
+                ("力学",),
+                "rule",
+                0.95,
+                ("test evidence",),
+                1,
+            )
+            record = ingest.classification_to_dict(classification)
+            record["migration_phase"] = "classified_local"
+            with mock.patch.object(ingest, "ROOT", root):
+                database = ingest.db_open()
+            database.execute(
+                """INSERT INTO files(
+                    sha256,source_path,state,markdown_path,error,updated_at,
+                    metrics_json
+                ) VALUES(?,?,?,?,?,?,?)""",
+                ("a" * 64, str(root / "source.pdf"), "completed", str(old_path), "", 1, "{}"),
+            )
+            database.execute(
+                """INSERT INTO groups(
+                    group_id,group_name,state,markdown_path,error,updated_at,
+                    classification_json
+                ) VALUES(?,?,?,?,?,?,?)""",
+                ("group-1", "Test", "completed", str(old_path), "", 1, "{}"),
+            )
+            database.commit()
+            config = {
+                "folders": {"markdown": markdown_root, "work": scratch},
+            }
+            target_text = ingest.classification_frontmatter(
+                "group-1", "Test", classification, "parent"
+            ) + ingest.classified_parent_body(old_path, classification)
+            row = database.execute(
+                "SELECT * FROM groups WHERE group_id='group-1'"
+            ).fetchone()
+            journal = ingest.write_classification_migration_journal(
+                config,
+                row,
+                old_path,
+                target,
+                classification,
+                record,
+                target_text,
+            )
+            os.replace(old_path, target)
+            try:
+                recovered = ingest.recover_classification_migration_journals(
+                    config, database
+                )
+                group = database.execute(
+                    "SELECT state,markdown_path FROM groups WHERE group_id='group-1'"
+                ).fetchone()
+                file_row = database.execute(
+                    "SELECT markdown_path FROM files WHERE sha256=?", ("a" * 64,)
+                ).fetchone()
+                self.assertEqual(recovered["recovered"], 1)
+                self.assertEqual(recovered["errors"], 0)
+                self.assertEqual(group["state"], "classification_migrating")
+                self.assertEqual(Path(group["markdown_path"]), target)
+                self.assertEqual(Path(file_row["markdown_path"]), target)
+                self.assertEqual(target.read_text("utf-8"), target_text)
+                self.assertFalse(journal.exists())
+            finally:
+                database.close()
+
+    def test_classification_move_journal_rejects_unknown_target_bytes(self) -> None:
+        """Recovery must retain evidence instead of adopting changed bytes."""
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            markdown_root = root / "markdown"
+            old_path = markdown_root / "old.md"
+            target = markdown_root / "试卷" / "target.md"
+            target.parent.mkdir(parents=True)
+            old_path.write_text("# Original\n\nBody\n", encoding="utf-8")
+            classification = ingest.DocumentClassification(
+                "试卷", "未知机构", "综合", ("综合",), "rule", 0.9, (), 1
+            )
+            record = ingest.classification_to_dict(classification)
+            with mock.patch.object(ingest, "ROOT", root):
+                database = ingest.db_open()
+            database.execute(
+                """INSERT INTO groups(
+                    group_id,group_name,state,markdown_path,error,updated_at
+                ) VALUES(?,?,?,?,?,?)""",
+                ("group-2", "Test", "completed", str(old_path), "", 1),
+            )
+            database.commit()
+            config = {
+                "folders": {"markdown": markdown_root, "work": root / "work"},
+            }
+            target_text = ingest.classification_frontmatter(
+                "group-2", "Test", classification, "parent"
+            ) + ingest.classified_parent_body(old_path, classification)
+            row = database.execute(
+                "SELECT * FROM groups WHERE group_id='group-2'"
+            ).fetchone()
+            journal = ingest.write_classification_migration_journal(
+                config,
+                row,
+                old_path,
+                target,
+                classification,
+                record,
+                target_text,
+            )
+            os.replace(old_path, target)
+            target.write_text("# Replacement\n", encoding="utf-8")
+            try:
+                recovered = ingest.recover_classification_migration_journals(
+                    config, database
+                )
+                group_path = database.execute(
+                    "SELECT markdown_path FROM groups WHERE group_id='group-2'"
+                ).fetchone()[0]
+                self.assertEqual(recovered["errors"], 1)
+                self.assertEqual(Path(group_path), old_path)
+                self.assertEqual(target.read_text("utf-8"), "# Replacement\n")
+                self.assertTrue(journal.is_file())
+            finally:
+                database.close()
+
     def test_archive_status_matches_retention_policy(self) -> None:
         source = (ROOT / "ingest.py").read_text("utf-8")
         self.assertIn("压缩包已展开并永久删除原包", source)
@@ -356,20 +558,65 @@ class PublicTemplateTests(unittest.TestCase):
     def test_archive_directory_paths_are_validated_before_extraction(self) -> None:
         import ingest
 
-        result = subprocess.CompletedProcess(
-            args=["7z"],
-            returncode=0,
-            stdout="Path = ../outside\nSize = 0\nFolder = +\n\n",
-            stderr="",
-        )
         config = {
             "archive_executable": Path("7z"),
             "max_archive_files": 10,
             "max_expanded_gb": 1,
         }
-        with mock.patch.object(ingest.subprocess, "run", return_value=result):
-            with self.assertRaisesRegex(RuntimeError, "异常路径"):
+        with self.assertRaisesRegex(RuntimeError, "异常路径"):
+            ingest.parse_archive_inventory_lines(
+                ["Path = ../outside", "Folder = +", ""],
+                config,
+            )
+        self.assertEqual(
+            ingest.parse_archive_inventory_lines(
+                [
+                    "Path = C:\\input\\sample.zip",
+                    "Type = zip",
+                    "Physical Size = 123",
+                    "",
+                ],
+                config,
+            ),
+            (0, 0),
+        )
+
+    def test_archive_listing_is_streamed_and_nested_budget_is_cumulative(self) -> None:
+        import ingest
+
+        config = {
+            "archive_executable": Path("7z"),
+            "max_archive_files": 10,
+            "max_expanded_gb": 1,
+        }
+
+        class FakeProcess:
+            def __init__(self, payload: bytes):
+                self.stdout = io.BytesIO(payload)
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                self.returncode = 0 if self.returncode is None else self.returncode
+                return self.returncode
+
+        fake = FakeProcess(b"X" * 65)
+        with (
+            mock.patch.object(ingest, "MAX_ARCHIVE_LIST_BYTES", 64),
+            mock.patch.object(ingest.subprocess, "Popen", return_value=fake),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "清单输出超过"):
                 ingest.archive_inventory(Path("sample.zip"), config)
+
+        budget = {"entries": 0, "expanded": 0}
+        ingest.charge_archive_chain_budget(budget, 6, 100, config)
+        with self.assertRaisesRegex(RuntimeError, "累计条目数"):
+            ingest.charge_archive_chain_budget(budget, 5, 100, config)
 
     def test_plain_document_does_not_require_7zip(self) -> None:
         import ingest
@@ -644,6 +891,8 @@ class PublicTemplateTests(unittest.TestCase):
         script = (ROOT / "scripts" / "configure-weknora.ps1").read_text(
             "utf-8"
         )
+        self.assertNotIn("2>&1", script)
+        self.assertIn("$Raw = (& $Cli @Arguments 2>$null)", script)
         self.assertIn("Set-YamlScalar", script)
         self.assertIn('"model", "view"', script)
         self.assertIn("embedding_parameters.dimension", script)
@@ -931,6 +1180,23 @@ class PublicTemplateTests(unittest.TestCase):
         self.assertIn("if (-not (Test-Path $PidFile)) { return $null }", start)
         self.assertIn("[regex]::Escape($IngestScript)", start)
         self.assertIn("[regex]::Escape($IngestScript)", stop)
+        self.assertIn("function Stop-ProcessTree", start)
+        self.assertIn("function Stop-ProcessTree", stop)
+        self.assertIn("Stop-ProcessTree ([int]$Row.ProcessId)", start)
+        self.assertIn("Stop-ProcessTree $SavedPid", stop)
+
+    def test_windows_powershell_reads_rewritten_utf8_files_explicitly(self) -> None:
+        """Windows PowerShell 5.1 must not decode UTF-8 files as ANSI."""
+        doctor = (ROOT / "scripts" / "doctor.ps1").read_text("utf-8")
+        status = (ROOT / "scripts" / "status.ps1").read_text("utf-8")
+        release = (ROOT / "scripts" / "release-audit.ps1").read_text("utf-8")
+        self.assertIn("[IO.File]::ReadAllText($Config", doctor)
+        self.assertIn("[IO.File]::ReadAllText($LocalConfig", status)
+        self.assertIn("[IO.File]::ReadAllText($File.FullName", release)
+        self.assertNotIn(
+            "Get-Content -Raw -LiteralPath $File.FullName",
+            release,
+        )
 
     def test_weknora_images_and_pdf_security_floor_are_pinned(self) -> None:
         bootstrap = (ROOT / "scripts" / "bootstrap.ps1").read_text("utf-8")

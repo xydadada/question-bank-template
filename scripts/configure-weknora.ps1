@@ -15,9 +15,15 @@ if (-not (Test-Path $Cli)) { throw "Missing bin/weknora.exe. Run scripts/bootstr
 if (-not (Test-Path $Config)) { throw "Missing config.local.yaml. Run scripts/bootstrap.ps1 first." }
 
 function Run-Json([string[]]$Arguments) {
-    $Raw = (& $Cli @Arguments 2>&1) -join "`n"
-    if ($LASTEXITCODE -ne 0) { throw $Raw }
-    return $Raw | ConvertFrom-Json
+    # The CLI reserves stdout for JSON but may write harmless notices to
+    # stderr. Combining the streams corrupts otherwise valid JSON output.
+    $Raw = (& $Cli @Arguments 2>$null) -join "`n"
+    if ($LASTEXITCODE -ne 0) {
+        throw "WeKnora CLI command failed: $($Arguments -join ' ')"
+    }
+    try { return $Raw | ConvertFrom-Json } catch {
+        throw "WeKnora CLI returned malformed JSON: $($Arguments -join ' ')"
+    }
 }
 
 $Profiles = Run-Json @("profile", "list", "--format", "json")

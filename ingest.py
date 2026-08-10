@@ -4,6 +4,7 @@ import argparse
 import atexit
 import base64
 import builtins
+import codecs
 import ctypes
 import difflib
 import hashlib
@@ -21,6 +22,7 @@ import threading
 import time
 import zipfile
 from collections import Counter, deque
+from collections.abc import Iterable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -85,6 +87,7 @@ PRINT_LOCK = threading.Lock()
 MAX_MINERU_RESULT_ZIP_BYTES = 2 * 1024**3
 MAX_MINERU_RESULT_FILES = 100_000
 MAX_MINERU_RESULT_EXPANDED_BYTES = 20 * 1024**3
+MAX_ARCHIVE_LIST_BYTES = 64 * 1024**2
 
 
 def print(*args, **kwargs) -> None:
@@ -1590,43 +1593,26 @@ def safe_archive_member(name: str) -> bool:
     return ".." not in path.parts
 
 
-def archive_inventory(archive: Path, cfg: dict) -> tuple[int, int]:
-    executable = cfg["archive_executable"]
-    result = subprocess.run(
-        [
-            str(executable),
-            "l",
-            "-slt",
-            "-sccUTF-8",
-            str(archive),
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=600,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()[-500:]
-        raise RuntimeError(f"压缩包无法读取或可能已加密: {detail}")
-    records = []
-    current: dict[str, str] = {}
-    for line in result.stdout.splitlines():
-        if not line.strip():
-            if current:
-                records.append(current)
-                current = {}
-            continue
-        if " = " in line:
-            key, value = line.split(" = ", 1)
-            current[key.strip()] = value.strip()
-    if current:
-        records.append(current)
+def parse_archive_inventory_lines(
+    lines: Iterable[str], cfg: dict
+) -> tuple[int, int]:
+    """Validate a 7-Zip -slt listing without retaining the whole listing."""
+    max_files = int(cfg["max_archive_files"])
+    max_bytes = int(float(cfg["max_expanded_gb"]) * 1024**3)
     count = 0
     expanded = 0
-    for record in records:
-        if "Path" not in record or "Size" not in record:
-            continue
+    current: dict[str, str] = {}
+
+    def consume(record: dict[str, str]) -> None:
+        nonlocal count, expanded
+        if "Path" not in record:
+            return
+        # The first -slt record describes the archive itself rather than a
+        # member.  It normally has Type/Physical Size but no member Size.
+        if "Size" not in record and (
+            "Type" in record or "Physical Size" in record
+        ):
+            return
         if record.get("Encrypted") == "+":
             raise RuntimeError("压缩包包含加密文件")
         if not safe_archive_member(record["Path"]):
@@ -1634,26 +1620,132 @@ def archive_inventory(archive: Path, cfg: dict) -> tuple[int, int]:
         if record.get("Symbolic Link") or record.get("Hard Link"):
             raise RuntimeError(f"压缩包包含链接成员: {record['Path']}")
         count += 1
-        max_files = int(cfg["max_archive_files"])
         if count > max_files:
             raise RuntimeError(f"压缩包条目数超过限制: {count} > {max_files}")
-        folder = record.get("Folder") == "+" or record.get("Attributes", "").startswith("D")
+        folder = record.get("Folder") == "+" or record.get(
+            "Attributes", ""
+        ).startswith("D")
         if folder:
-            continue
+            return
+        if "Size" not in record:
+            raise RuntimeError("压缩包成员缺少可验证的文件大小")
         try:
             size = int(record["Size"])
         except ValueError as exc:
             raise RuntimeError("压缩包文件大小无法识别") from exc
+        if size < 0:
+            raise RuntimeError("压缩包文件大小不能为负数")
         expanded += size
+        if expanded > max_bytes:
+            raise RuntimeError(
+                f"压缩包展开量超过限制: {expanded / 1024**3:.2f}GB"
+            )
+
+    for line in lines:
+        if not line.strip():
+            if current:
+                consume(current)
+                current = {}
+            continue
+        if " = " in line:
+            key, value = line.split(" = ", 1)
+            current[key.strip()] = value.strip()
+    if current:
+        consume(current)
+    return count, expanded
+
+
+def archive_inventory(archive: Path, cfg: dict) -> tuple[int, int]:
+    executable = cfg["archive_executable"]
+    process = subprocess.Popen(
+        [str(executable), "l", "-slt", "-sccUTF-8", str(archive)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if process.stdout is None:
+        process.kill()
+        raise RuntimeError("无法读取7-Zip压缩包清单")
+    timed_out = threading.Event()
+
+    def stop_listing() -> None:
+        timed_out.set()
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+    timer = threading.Timer(600, stop_listing)
+    timer.daemon = True
+    timer.start()
+    output_tail = ""
+
+    def listing_lines() -> Iterable[str]:
+        nonlocal output_tail
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        buffered = ""
+        received = 0
+        while True:
+            chunk = process.stdout.read(64 * 1024)
+            if not chunk:
+                break
+            received += len(chunk)
+            if received > MAX_ARCHIVE_LIST_BYTES:
+                raise RuntimeError("压缩包清单输出超过64MB安全上限")
+            decoded = decoder.decode(chunk)
+            output_tail = (output_tail + decoded)[-4000:]
+            buffered += decoded
+            while "\n" in buffered:
+                line, buffered = buffered.split("\n", 1)
+                yield line.rstrip("\r")
+        buffered += decoder.decode(b"", final=True)
+        if buffered:
+            yield buffered.rstrip("\r")
+
+    try:
+        inventory = parse_archive_inventory_lines(listing_lines(), cfg)
+        try:
+            returncode = process.wait(timeout=10)
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            raise RuntimeError("7-Zip清单进程未正常退出") from exc
+        if timed_out.is_set():
+            raise RuntimeError("读取压缩包清单超过600秒")
+        if returncode != 0:
+            raise RuntimeError(
+                "压缩包无法读取或可能已加密: " + output_tail.strip()[-500:]
+            )
+        return inventory
+    finally:
+        timer.cancel()
+        if process.poll() is None:
+            process.kill()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+        process.stdout.close()
+
+
+def charge_archive_chain_budget(
+    budget: dict[str, int], entries: int, expanded: int, cfg: dict
+) -> None:
+    """Limit cumulative work across all nested archives from one root archive."""
+    proposed_entries = int(budget.get("entries", 0)) + max(0, int(entries))
+    proposed_expanded = int(budget.get("expanded", 0)) + max(0, int(expanded))
     max_files = int(cfg["max_archive_files"])
     max_bytes = int(float(cfg["max_expanded_gb"]) * 1024**3)
-    if count > max_files:
-        raise RuntimeError(f"压缩包文件数超过限制: {count} > {max_files}")
-    if expanded > max_bytes:
+    if proposed_entries > max_files:
         raise RuntimeError(
-            f"压缩包展开量超过限制: {expanded / 1024**3:.2f}GB"
+            f"嵌套压缩包累计条目数超过限制: {proposed_entries} > {max_files}"
         )
-    return count, expanded
+    if proposed_expanded > max_bytes:
+        raise RuntimeError(
+            "嵌套压缩包累计展开量超过限制: "
+            f"{proposed_expanded / 1024**3:.2f}GB"
+        )
+    budget["entries"] = proposed_entries
+    budget["expanded"] = proposed_expanded
 
 
 def has_reparse_point(path: Path) -> bool:
@@ -1680,6 +1772,7 @@ def extract_archive(
     depth: int,
     cfg: dict,
     work_root: Path,
+    chain_budget: dict[str, int] | None = None,
 ) -> Path:
     suffix = archive_suffix(archive, cfg)
     if not suffix:
@@ -1688,7 +1781,11 @@ def extract_archive(
         raise RuntimeError(f"压缩包嵌套超过{cfg['max_archive_depth']}层")
     wait_until_stable(archive)
     digest = sha256(archive)
-    _, expanded_bytes = archive_inventory(archive, cfg)
+    listed_entries, expanded_bytes = archive_inventory(archive, cfg)
+    if chain_budget is not None:
+        charge_archive_chain_budget(
+            chain_budget, listed_entries, expanded_bytes, cfg
+        )
     reserve_bytes = int(float(cfg.get("min_free_gb_after_extract", 0)) * 1024**3)
     available_bytes = shutil.disk_usage(work_root).free
     if expanded_bytes > max(0, available_bytes - reserve_bytes):
@@ -1733,6 +1830,13 @@ def extract_archive(
             raise RuntimeError("压缩包实际文件数超过限制")
         if total_size > int(float(cfg["max_expanded_gb"]) * 1024**3):
             raise RuntimeError("压缩包实际展开量超过限制")
+        if chain_budget is not None:
+            charge_archive_chain_budget(
+                chain_budget,
+                max(0, len(files) - listed_entries),
+                max(0, total_size - expanded_bytes),
+                cfg,
+            )
         if files:
             shutil.move(str(stage), str(target))
         else:
@@ -1817,7 +1921,7 @@ def classify_inbox(cfg: dict) -> ClassificationStats:
         except Exception as exc:
             print(f"链接或重解析点无法移动，仍留在inbox: {path}: {exc}")
     queue = deque(
-        (path, 0)
+        (path, 0, str(path.resolve()))
         for path in inbox.rglob("*")
         if path.is_file()
         and path.name != ".gitkeep"
@@ -1825,14 +1929,22 @@ def classify_inbox(cfg: dict) -> ClassificationStats:
     )
     if queue and not executable.is_file():
         raise RuntimeError(f"检测到压缩包但7-Zip不存在: {executable}")
-    queued = {path.resolve() for path, _ in queue}
+    queued = {path.resolve() for path, _, _ in queue}
+    chain_budgets: dict[str, dict[str, int]] = {
+        root_key: {"entries": 0, "expanded": 0}
+        for _, _, root_key in queue
+    }
     while queue:
-        archive, depth = queue.popleft()
+        archive, depth, root_key = queue.popleft()
         if not archive.exists():
             continue
         try:
             extracted = extract_archive(
-                archive, depth, classification, work
+                archive,
+                depth,
+                classification,
+                work,
+                chain_budget=chain_budgets[root_key],
             )
             stats.archives_extracted += 1
             for nested in extracted.rglob("*"):
@@ -1842,7 +1954,7 @@ def classify_inbox(cfg: dict) -> ClassificationStats:
                     and archive_suffix(nested, classification)
                     and resolved not in queued
                 ):
-                    queue.append((nested, depth + 1))
+                    queue.append((nested, depth + 1, root_key))
                     queued.add(resolved)
             if classification.get("delete_archives_after_extract", False):
                 print(f"压缩包已展开并永久删除原包: {archive.name}")
@@ -6897,6 +7009,14 @@ def atomic_write(path: Path, text: str) -> None:
     os.replace(temporary, path)
 
 
+def atomic_write_text_sha256(text: str) -> str:
+    """Return the byte digest produced by atomic_write on this platform."""
+    cleaned = text.replace("\x00", "")
+    if os.linesep != "\n":
+        cleaned = cleaned.replace("\n", os.linesep)
+    return hashlib.sha256(cleaned.encode("utf-8")).hexdigest()
+
+
 def read_direct_text(source: Path) -> str:
     raw = source.read_bytes()
     for encoding in ("utf-8-sig", "gb18030", "utf-16"):
@@ -6936,7 +7056,74 @@ def wait_until_stable(source: Path, seconds: int = 3) -> None:
         raise RuntimeError("文件仍在复制或写入，请稍后自动重试")
 
 
+def reconcile_pending_deletion_audits(db: sqlite3.Connection) -> dict[str, int]:
+    """Close deletion intents interrupted between unlink and final audit update."""
+    result = {"confirmed_missing": 0, "not_deleted": 0, "uncertain": 0}
+    rows = db.execute(
+        """SELECT * FROM deletion_audit
+        WHERE success=0 AND completed_at IS NULL ORDER BY id"""
+    ).fetchall()
+    now = int(time.time())
+    for row in rows:
+        source = Path(row["source_path"])
+        canonical = Path(row["markdown_path"])
+        if source.exists():
+            db.execute(
+                """UPDATE deletion_audit SET completed_at=?,error=?
+                WHERE id=? AND success=0 AND completed_at IS NULL""",
+                (
+                    now,
+                    "启动恢复确认源文件仍存在；此前删除未完成",
+                    row["id"],
+                ),
+            )
+            result["not_deleted"] += 1
+            continue
+        try:
+            retained_matches = (
+                canonical.is_file()
+                and stable_sha256(canonical)
+                == str(row["markdown_sha256"] or "")
+            )
+        except (OSError, RuntimeError):
+            retained_matches = False
+        if retained_matches:
+            db.execute(
+                """UPDATE deletion_audit
+                SET completed_at=?,success=1,error=?
+                WHERE id=? AND success=0 AND completed_at IS NULL""",
+                (
+                    now,
+                    "启动恢复确认：删除意图提交后源文件已不存在",
+                    row["id"],
+                ),
+            )
+            result["confirmed_missing"] += 1
+        else:
+            db.execute(
+                """UPDATE deletion_audit SET completed_at=?,error=?
+                WHERE id=? AND success=0 AND completed_at IS NULL""",
+                (
+                    now,
+                    "源文件已不存在，但保留Markdown缺失或摘要变化；无法确认删除结果",
+                    row["id"],
+                ),
+            )
+            result["uncertain"] += 1
+    if rows:
+        db.commit()
+    return result
+
+
 def reconcile_deleted_sources(db: sqlite3.Connection) -> None:
+    audit_result = reconcile_pending_deletion_audits(db)
+    if any(audit_result.values()):
+        print(
+            "删除审计中断恢复："
+            f"确认已不存在{audit_result['confirmed_missing']}｜"
+            f"确认未删除{audit_result['not_deleted']}｜"
+            f"无法确认{audit_result['uncertain']}"
+        )
     rows = db.execute(
         "SELECT * FROM files WHERE state='verified'"
     ).fetchall()
@@ -11428,12 +11615,185 @@ def classified_parent_body(
     return body.strip() + "\n"
 
 
+def classification_migration_journal_path(cfg: dict, group_id: str) -> Path:
+    token = hashlib.sha256(group_id.encode("utf-8")).hexdigest()[:24]
+    return (
+        cfg["folders"]["work"]
+        / "classification-migration"
+        / f"{token}.json"
+    )
+
+
+def write_classification_migration_journal(
+    cfg: dict,
+    row: sqlite3.Row,
+    old_path: Path,
+    target: Path,
+    classification: DocumentClassification,
+    record: dict,
+    target_text: str,
+) -> Path:
+    """Persist the filesystem move intent before changing the live path."""
+    path = classification_migration_journal_path(cfg, str(row["group_id"]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "group_id": str(row["group_id"]),
+        "group_name": str(row["group_name"] or row["group_id"]),
+        "expected_updated_at": int(row["updated_at"] or 0),
+        "old_path": str(old_path),
+        "target_path": str(target),
+        "old_sha256": stable_sha256(old_path),
+        "target_sha256": atomic_write_text_sha256(target_text),
+        "classification": classification_to_dict(classification),
+        "classification_record": record,
+        "created_at": int(time.time()),
+    }
+    atomic_write(
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    )
+    return path
+
+
+def recover_classification_migration_journals(
+    cfg: dict,
+    db: sqlite3.Connection,
+) -> dict[str, int]:
+    """Repair a Markdown move interrupted before the SQLite path switch."""
+    root = cfg["folders"]["work"] / "classification-migration"
+    result = {"journals": 0, "recovered": 0, "cleared": 0, "errors": 0}
+    if not root.is_dir():
+        return result
+    markdown_root = cfg["folders"]["markdown"].resolve()
+
+    def checked_markdown_path(value: object) -> Path:
+        candidate = Path(str(value or ""))
+        resolved = candidate.resolve()
+        if resolved == markdown_root or markdown_root not in resolved.parents:
+            raise RuntimeError(
+                f"分类迁移日志路径越出Markdown目录: {candidate}"
+            )
+        return candidate
+
+    def same_path(first: Path, second: Path) -> bool:
+        return str(first.resolve()).casefold() == str(second.resolve()).casefold()
+
+    for journal in sorted(root.glob("*.json")):
+        result["journals"] += 1
+        try:
+            payload = json.loads(journal.read_text("utf-8"))
+            group_id = str(payload.get("group_id") or "").strip()
+            if not group_id:
+                raise RuntimeError("分类迁移日志缺少group_id")
+            old_path = checked_markdown_path(payload.get("old_path"))
+            target = checked_markdown_path(payload.get("target_path"))
+            if same_path(old_path, target):
+                raise RuntimeError("分类迁移日志的新旧路径相同")
+            old_digest = str(payload.get("old_sha256") or "")
+            target_digest = str(payload.get("target_sha256") or "")
+            if not old_digest or not target_digest:
+                raise RuntimeError("分类迁移日志缺少文件摘要")
+            row = db.execute(
+                "SELECT * FROM groups WHERE group_id=?",
+                (group_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("分类迁移日志对应资料组不存在")
+            if str(row["state"] or "") in PERMANENT_GROUP_EXCLUSION_STATES:
+                raise RuntimeError("资料组已永久排除，拒绝恢复旧迁移")
+            row_path = Path(str(row["markdown_path"] or ""))
+            row_is_old = same_path(row_path, old_path)
+            row_is_target = same_path(row_path, target)
+            if not row_is_old and not row_is_target:
+                raise RuntimeError("资料组Markdown路径已被其他操作修改")
+            expected_updated_at = int(payload.get("expected_updated_at") or 0)
+            if row_is_old and int(row["updated_at"] or 0) != expected_updated_at:
+                raise RuntimeError("资料组在分类迁移中断后已被其他操作更新")
+            if row_is_target and str(row["state"] or "") != "classification_migrating":
+                raise RuntimeError("资料组已越过本地分类迁移阶段，拒绝回退状态")
+            old_exists = old_path.is_file()
+            target_exists = target.is_file()
+            if old_exists and target_exists:
+                raise RuntimeError("分类迁移新旧Markdown同时存在，拒绝猜测")
+            if old_exists:
+                if not row_is_old or stable_sha256(old_path) != old_digest:
+                    raise RuntimeError("原Markdown路径或摘要已变化")
+                journal.unlink()
+                result["cleared"] += 1
+                continue
+            if not target_exists:
+                raise RuntimeError("分类迁移的新旧Markdown均不存在")
+            classification = classification_from_dict(
+                payload.get("classification") or {}
+            )
+            current_digest = stable_sha256(target)
+            if current_digest == old_digest:
+                recovered_text = classification_frontmatter(
+                    group_id,
+                    str(payload.get("group_name") or row["group_name"]),
+                    classification,
+                    "parent",
+                ) + classified_parent_body(target, classification)
+                recovered_digest = atomic_write_text_sha256(recovered_text)
+                if recovered_digest != target_digest:
+                    raise RuntimeError("分类迁移日志无法重建目标Markdown摘要")
+                atomic_write(target, recovered_text)
+                current_digest = stable_sha256(target)
+            if current_digest != target_digest:
+                raise RuntimeError("分类迁移目标Markdown摘要不匹配")
+            record = payload.get("classification_record") or {}
+            if not isinstance(record, dict):
+                raise RuntimeError("分类迁移日志的分类记录无效")
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute(
+                    "UPDATE files SET markdown_path=? WHERE markdown_path=?",
+                    (str(target), str(old_path)),
+                )
+                save_group_state(
+                    db,
+                    group_id,
+                    str(row["group_name"] or group_id),
+                    "classification_migrating",
+                    target,
+                    row["parent_doc_id"],
+                    row["child_doc_id"],
+                    classification=record,
+                    raw_path=(
+                        Path(row["raw_path"]) if row["raw_path"] else None
+                    ),
+                    raw_doc_id=row["raw_doc_id"],
+                    commit=False,
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            journal.unlink()
+            result["recovered"] += 1
+        except Exception as exc:
+            result["errors"] += 1
+            print(f"分类迁移中断日志保留等待恢复：{journal}｜{exc}")
+    return result
+
+
 def migrate_classified_markdown(
     cfg: dict,
     db: sqlite3.Connection,
     dry_run: bool,
     delete_old_indexes: bool,
 ) -> None:
+    if not dry_run:
+        recovered = recover_classification_migration_journals(cfg, db)
+        if recovered["journals"]:
+            print(
+                "分类迁移中断恢复："
+                f"日志{recovered['journals']}｜"
+                f"恢复{recovered['recovered']}｜"
+                f"未执行清理{recovered['cleared']}｜"
+                f"错误{recovered['errors']}"
+            )
     rows = db.execute(
         """SELECT * FROM groups
         WHERE markdown_path IS NOT NULL AND state != 'failed'
@@ -11519,6 +11879,14 @@ def migrate_classified_markdown(
         if dry_run:
             continue
 
+        markdown_root = cfg["folders"]["markdown"].resolve()
+        for label, candidate in (("原", old_path), ("目标", target)):
+            resolved = candidate.resolve()
+            if resolved == markdown_root or markdown_root not in resolved.parents:
+                raise RuntimeError(
+                    f"分类迁移{label}Markdown越出配置目录: {candidate}"
+                )
+
         legacy_parent_id = (
             existing_record.get("legacy_parent_doc_id")
             or row["parent_doc_id"]
@@ -11535,37 +11903,78 @@ def migrate_classified_markdown(
                 "migration_phase": "classified_local",
             }
         )
+        old_markdown_digest = stable_sha256(old_path)
         body = classified_parent_body(old_path, classification)
-        if old_path.resolve() != target.resolve():
-            if target.exists():
-                raise RuntimeError(f"分类目标已存在，拒绝覆盖: {target}")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(old_path, target)
-        atomic_write(
-            target,
-            classification_frontmatter(
-                row["group_id"],
-                row["group_name"],
-                classification,
-                "parent",
-            )
-            + body,
-        )
-        db.execute(
-            "UPDATE files SET markdown_path=? WHERE markdown_path=?",
-            (str(target), str(old_path)),
-        )
-        db.commit()
-        save_group_state(
-            db,
+        if stable_sha256(old_path) != old_markdown_digest:
+            raise RuntimeError("分类期间Markdown内容发生变化，拒绝迁移")
+        target_text = classification_frontmatter(
             row["group_id"],
             row["group_name"],
-            "classification_migrating",
-            target,
-            row["parent_doc_id"],
-            row["child_doc_id"],
-            classification=record,
-        )
+            classification,
+            "parent",
+        ) + body
+        move_journal = None
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            fresh = db.execute(
+                "SELECT * FROM groups WHERE group_id=?",
+                (row["group_id"],),
+            ).fetchone()
+            guarded_fields = (
+                "state",
+                "markdown_path",
+                "parent_doc_id",
+                "child_doc_id",
+                "raw_path",
+                "raw_doc_id",
+                "classification_json",
+                "updated_at",
+            )
+            if fresh is None or any(
+                str(fresh[field] or "") != str(row[field] or "")
+                for field in guarded_fields
+            ):
+                raise RuntimeError(
+                    "资料组在分类计算期间已被其他操作更新，拒绝覆盖"
+                )
+            if stable_sha256(old_path) != old_markdown_digest:
+                raise RuntimeError("分类提交前Markdown内容发生变化，拒绝迁移")
+            if old_path.resolve() != target.resolve():
+                if target.exists():
+                    raise RuntimeError(f"分类目标已存在，拒绝覆盖: {target}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                move_journal = write_classification_migration_journal(
+                    cfg,
+                    row,
+                    old_path,
+                    target,
+                    classification,
+                    record,
+                    target_text,
+                )
+                os.replace(old_path, target)
+            atomic_write(target, target_text)
+            db.execute(
+                "UPDATE files SET markdown_path=? WHERE markdown_path=?",
+                (str(target), str(old_path)),
+            )
+            save_group_state(
+                db,
+                row["group_id"],
+                row["group_name"],
+                "classification_migrating",
+                target,
+                row["parent_doc_id"],
+                row["child_doc_id"],
+                classification=record,
+                commit=False,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        if move_journal is not None:
+            move_journal.unlink()
 
         child_path = child_index_from_parent(
             target,
