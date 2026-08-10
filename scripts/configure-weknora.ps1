@@ -125,7 +125,7 @@ function Set-YamlScalar([string]$Yaml, [string]$Name, [string]$Value) {
     )
 }
 
-$Text = Get-Content -Raw -LiteralPath $Config
+$Text = [IO.File]::ReadAllText($Config, [Text.Encoding]::UTF8)
 $Text = Set-YamlScalar $Text "knowledge_base" $ParentId
 $Text = Set-YamlScalar $Text "parent_knowledge_base" $ParentId
 $Text = Set-YamlScalar $Text "child_knowledge_base" $ChildId

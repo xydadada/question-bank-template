@@ -22,6 +22,11 @@ Enabling any of them also requires the exact local acknowledgement
 `QUESTION_BANK_ALLOW_PERMANENT_DELETE=I_UNDERSTAND`. Keep backups outside this
 project until the workflow has been verified with disposable documents.
 
+Explorer-style deletion propagation is a separate destructive capability. It
+is disabled by default and requires
+`QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC=I_UNDERSTAND`; enabling video or
+source cleanup does not implicitly authorize it.
+
 ## Reporting
 
 Report security issues privately through GitHub's security-advisory feature.

@@ -16,7 +16,7 @@ $RuntimeProfile = "local"
 $McpProfile = "mcp-readonly"
 $LocalConfig = Join-Path $Root "config.local.yaml"
 if (Test-Path $LocalConfig) {
-    $ConfigText = Get-Content -Raw -LiteralPath $LocalConfig
+    $ConfigText = [IO.File]::ReadAllText($LocalConfig, [Text.Encoding]::UTF8)
     $ProfileMatch = [regex]::Match($ConfigText, '(?m)^  profile:\s*["'']?([^\s#"'']+)')
     if ($ProfileMatch.Success) { $RuntimeProfile = $ProfileMatch.Groups[1].Value }
     $McpSection = [regex]::Match($ConfigText, '(?ms)^mcp_public:\s*\r?\n(?<body>(?:^[ \t]+[^\r\n]*(?:\r?\n|$))*)')
@@ -38,16 +38,40 @@ function Get-ManagedProcess(
     [string]$ExpectedExecutable,
     [string]$CommandPattern
 ) {
-    if (-not (Test-Path $PidFile)) { return $null }
-    try { $SavedPid = [int](Get-Content -Raw -LiteralPath $PidFile) } catch {
+    $Expected = [IO.Path]::GetFullPath($ExpectedExecutable)
+    $SharedWslPath = [IO.Path]::GetFullPath($WslExe)
+    if ($Expected.Equals($SharedWslPath, [StringComparison]::OrdinalIgnoreCase)) {
+        if (-not (Test-Path $PidFile)) { return $null }
+        try { $SavedPid = [int](Get-Content -Raw -LiteralPath $PidFile) } catch {
+            Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
+            return $null
+        }
+        $SavedRow = Get-CimInstance Win32_Process -Filter "ProcessId=$SavedPid" -ErrorAction SilentlyContinue
+        if ($SavedRow -and $SavedRow.ExecutablePath -and
+            [IO.Path]::GetFullPath($SavedRow.ExecutablePath).Equals($Expected, [StringComparison]::OrdinalIgnoreCase) -and
+            (!$CommandPattern -or $SavedRow.CommandLine -match $CommandPattern)) {
+            return $SavedRow
+        }
         Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
         return $null
     }
-    $Row = Get-CimInstance Win32_Process -Filter "ProcessId=$SavedPid" -ErrorAction SilentlyContinue
-    $Expected = [IO.Path]::GetFullPath($ExpectedExecutable)
-    if ($Row -and $Row.ExecutablePath -and
-        [IO.Path]::GetFullPath($Row.ExecutablePath).Equals($Expected, [StringComparison]::OrdinalIgnoreCase) -and
-        (!$CommandPattern -or $Row.CommandLine -match $CommandPattern)) {
+    $Managed = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.ExecutablePath -and
+        [IO.Path]::GetFullPath($_.ExecutablePath).Equals($Expected, [StringComparison]::OrdinalIgnoreCase) -and
+        (!$CommandPattern -or $_.CommandLine -match $CommandPattern)
+    })
+    if ($Managed.Count -gt 1) {
+        throw "Multiple managed processes match '$CommandPattern'. Run scripts/stop.ps1 before starting again."
+    }
+    $SavedPid = 0
+    if (Test-Path $PidFile) {
+        try { $SavedPid = [int](Get-Content -Raw -LiteralPath $PidFile) } catch { $SavedPid = 0 }
+    }
+    if ($Managed.Count -eq 1) {
+        $Row = $Managed[0]
+        if ($SavedPid -ne $Row.ProcessId) {
+            [IO.File]::WriteAllText($PidFile, [string]$Row.ProcessId, [Text.UTF8Encoding]::new($false))
+        }
         return $Row
     }
     Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
@@ -92,6 +116,19 @@ function Get-ActiveComposeServices {
 }
 
 New-Item -ItemType Directory -Force -Path $Runtime | Out-Null
+$MutexHasher = [Security.Cryptography.SHA256]::Create()
+try {
+    $MutexDigest = ([BitConverter]::ToString(
+        $MutexHasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($Root.ToLowerInvariant()))
+    )).Replace('-', '').Substring(0, 24)
+} finally { $MutexHasher.Dispose() }
+$StartMutex = [Threading.Mutex]::new($false, "Local\QuestionBank-$MutexDigest-StackStart")
+$StartMutexOwned = $false
+try { $StartMutexOwned = $StartMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $StartMutexOwned = $true }
+if (-not $StartMutexOwned) {
+    $StartMutex.Dispose()
+    throw "Another stack start operation is already running for this template."
+}
 $KeepAlivePid = Join-Path $Runtime "wsl-keepalive.pid"
 $DistroFile = Join-Path $Runtime "wsl-distro.txt"
 $PreviousDistro = if (Test-Path $DistroFile) { (Get-Content -Raw -LiteralPath $DistroFile).Trim() } else { "" }
@@ -114,6 +151,8 @@ $IngestStarted = $false
 $ProxyStarted = $false
 $TunnelStarted = $false
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
+$IngestScript = Join-Path $Root "ingest.py"
+$LocalConfigPath = Join-Path $Root "config.local.yaml"
 $IngestPidFile = Join-Path $Runtime "ingest.pid"
 $ProxyPidFile = Join-Path $Root "mcp-public\proxy.pid"
 $TunnelPidFile = Join-Path $Root "mcp-public\cloudflared.pid"
@@ -158,13 +197,13 @@ try {
 
     if ($Processing) {
         if (-not (Test-Path $Python)) { throw "Missing .venv. Run scripts/bootstrap.ps1 first." }
-        $IngestPattern = "(?i)ingest\.py.*--supervise"
+        $IngestPattern = '(?i)' + [regex]::Escape($IngestScript) + '.*--supervise'
         $Existing = Get-ManagedProcess $IngestPidFile $Python $IngestPattern
         if (-not $Existing) {
             $LogDir = Join-Path $Runtime "logs"
             New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
             $Process = Start-Process -FilePath $Python `
-                -ArgumentList @("ingest.py", "--supervise", "--config", "config.local.yaml") `
+                -ArgumentList @("`"$IngestScript`"", "--supervise", "--config", "`"$LocalConfigPath`"") `
                 -WorkingDirectory $Root -WindowStyle Hidden -PassThru `
                 -RedirectStandardOutput (Join-Path $LogDir "ingest.stdout.log") `
                 -RedirectStandardError (Join-Path $LogDir "ingest.stderr.log")
@@ -196,7 +235,7 @@ try {
 } catch {
     if ($TunnelStarted) { Stop-RollbackProcess $TunnelPidFile $CloudflaredExe $TunnelPattern }
     if ($ProxyStarted) { Stop-RollbackProcess $ProxyPidFile $ProxyExe '127\.0\.0\.1:18081' }
-    if ($IngestStarted) { Stop-RollbackProcess $IngestPidFile $Python '(?i)ingest\.py.*--supervise' }
+    if ($IngestStarted) { Stop-RollbackProcess $IngestPidFile $Python $IngestPattern }
     if ($ComposeUpAttempted -and -not $NewlyStartedComposeServices.Count) {
         try {
             $CurrentComposeServices = @(Get-ActiveComposeServices)
@@ -211,4 +250,7 @@ try {
     }
     if ($KeepAliveStarted) { Stop-RollbackProcess $KeepAlivePid $WslExe $KeepAlivePattern }
     throw
+} finally {
+    if ($StartMutexOwned) { $StartMutex.ReleaseMutex() }
+    $StartMutex.Dispose()
 }

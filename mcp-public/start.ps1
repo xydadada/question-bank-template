@@ -16,6 +16,22 @@ $LogDir = Join-Path $Base "logs"
 $PidFile = Join-Path $Base "proxy.pid"
 $FingerprintFile = Join-Path $DataDir "proxy-config.sha256"
 
+$MutexHasher = [Security.Cryptography.SHA256]::Create()
+try {
+    $MutexDigest = ([BitConverter]::ToString(
+        $MutexHasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($Root.ToLowerInvariant()))
+    )).Replace('-', '').Substring(0, 24)
+} finally { $MutexHasher.Dispose() }
+$StartMutex = [Threading.Mutex]::new($false, "Local\QuestionBank-$MutexDigest-McpProxyStart")
+$StartMutexOwned = $false
+try { $StartMutexOwned = $StartMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $StartMutexOwned = $true }
+if (-not $StartMutexOwned) {
+    $StartMutex.Dispose()
+    throw "Another MCP proxy start operation is already running for this template."
+}
+
+try {
+
 if ($Profile -notmatch '^[A-Za-z0-9._-]+$') { throw "Profile names may only contain letters, numbers, dot, underscore and hyphen." }
 if (-not $ExternalUrl) { throw "Pass -ExternalUrl https://your-mcp-hostname." }
 $ParsedExternalUrl = $null
@@ -41,7 +57,9 @@ if ($LASTEXITCODE -ne 0 -or -not (@(($ProfileJson | ConvertFrom-Json).data) | Wh
 }
 
 function Invoke-WeKnoraJson([string[]]$Arguments, [string]$FailureMessage) {
-    $Raw = (& $WeKnora @Arguments 2>&1) -join "`n"
+    # The CLI contract reserves stdout for JSON and may emit harmless notices
+    # on stderr. Mixing both streams makes valid JSON impossible to parse.
+    $Raw = (& $WeKnora @Arguments 2>$null) -join "`n"
     if ($LASTEXITCODE -ne 0) { throw $FailureMessage }
     try { return $Raw | ConvertFrom-Json } catch {
         throw "$FailureMessage The official CLI returned malformed JSON."
@@ -61,7 +79,7 @@ $VisibleKnowledgeBases = @($KnowledgeBases.data) | Where-Object { $_.id }
 if (-not $VisibleKnowledgeBases.Count) {
     throw "MCP profile '$Profile' has no visible knowledge base. Grant retrieve access to at least one intended knowledge base."
 }
-$ConfigText = Get-Content -Raw -LiteralPath $LocalConfig
+$ConfigText = [IO.File]::ReadAllText($LocalConfig, [Text.Encoding]::UTF8)
 $ExpectedKnowledgeBaseIds = [Collections.Generic.List[string]]::new()
 foreach ($Setting in "parent_knowledge_base", "child_knowledge_base", "raw_knowledge_base") {
     $SettingMatch = [regex]::Match(
@@ -74,23 +92,38 @@ foreach ($Setting in "parent_knowledge_base", "child_knowledge_base", "raw_knowl
     $ExpectedKnowledgeBaseIds.Add($SettingMatch.Groups['id'].Value)
 }
 $VisibleIds = @($VisibleKnowledgeBases | ForEach-Object { [string]$_.id })
+$UniqueExpectedIds = @($ExpectedKnowledgeBaseIds | Select-Object -Unique)
+if ($UniqueExpectedIds.Count -ne 3) {
+    throw "The configured parent, child, and raw knowledge-base IDs must be three distinct values."
+}
 $MissingKnowledgeBaseIds = @(
     $ExpectedKnowledgeBaseIds | Where-Object { $_ -notin $VisibleIds }
 )
 if ($MissingKnowledgeBaseIds.Count) {
     throw "MCP profile '$Profile' cannot see every configured question-bank layer. Missing knowledge-base IDs: $($MissingKnowledgeBaseIds -join ', '). Update the dedicated API key permissions and reconfigure the profile."
 }
-$ProbeKnowledgeBase = $VisibleKnowledgeBases | Where-Object {
-    [string]$_.id -eq $ExpectedKnowledgeBaseIds[0] -and $_.embedding_model_id
-} | Select-Object -First 1
-if (-not $ProbeKnowledgeBase) {
-    throw "The configured parent knowledge base is visible but has no embedding model. Repair its model configuration before exposing MCP."
+$UnexpectedKnowledgeBaseIds = @(
+    $VisibleIds | Where-Object { $_ -notin $UniqueExpectedIds }
+)
+if ($UnexpectedKnowledgeBaseIds.Count) {
+    throw "MCP profile '$Profile' can see knowledge bases outside the configured three layers. Unexpected IDs: $($UnexpectedKnowledgeBaseIds -join ', '). Restrict the dedicated API key before exposing MCP."
 }
-Invoke-WeKnoraJson @(
-    "search", "chunks", "question bank startup health probe",
-    "--kb", ([string]$ProbeKnowledgeBase.id), "--limit", "1",
-    "--format", "json", "--profile", $Profile
-) "MCP profile '$Profile' could not complete a real hybrid search. Check its retrieve permission and the configured embedding service." | Out-Null
+foreach ($KnowledgeBaseId in $UniqueExpectedIds) {
+    $ProbeKnowledgeBase = $VisibleKnowledgeBases | Where-Object {
+        [string]$_.id -eq $KnowledgeBaseId -and $_.embedding_model_id
+    } | Select-Object -First 1
+    if (-not $ProbeKnowledgeBase) {
+        throw "Configured knowledge base '$KnowledgeBaseId' is visible but has no embedding model. Repair its model configuration before exposing MCP."
+    }
+    $SearchResult = Invoke-WeKnoraJson @(
+        "search", "chunks", "question bank startup health probe",
+        "--kb", ([string]$ProbeKnowledgeBase.id), "--limit", "1",
+        "--format", "json", "--profile", $Profile
+    ) "MCP profile '$Profile' could not search configured knowledge base '$KnowledgeBaseId'. Check its retrieve permission and embedding service."
+    if (-not @($SearchResult.data).Count) {
+        throw "Configured knowledge base '$KnowledgeBaseId' returned no retrieval result. Do not expose MCP until all three layers are indexed and searchable."
+    }
+}
 
 New-Item -ItemType Directory -Force -Path $DataDir, $LogDir, (Split-Path -Parent $HashFile) | Out-Null
 $Sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -106,10 +139,24 @@ try { $ExpectedFingerprint = ([BitConverter]::ToString($Hasher.ComputeHash($Fing
     [Array]::Clear($FingerprintBytes, 0, $FingerprintBytes.Length)
 }
 
+$RecordedPid = 0
+if (Test-Path $PidFile) {
+    try { $RecordedPid = [int](Get-Content -Raw -LiteralPath $PidFile) } catch { $RecordedPid = 0 }
+}
+$ExpectedPath = [IO.Path]::GetFullPath($Proxy)
+$ManagedProxies = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.ExecutablePath -and
+    [IO.Path]::GetFullPath($_.ExecutablePath).Equals($ExpectedPath, [StringComparison]::OrdinalIgnoreCase) -and
+    $_.CommandLine -match '127\.0\.0\.1:18081'
+})
+if ($ManagedProxies.Count -gt 1 -or
+    ($ManagedProxies.Count -eq 1 -and $ManagedProxies[0].ProcessId -ne $RecordedPid)) {
+    throw "Found an untracked or duplicate MCP proxy for this template. Run mcp-public/stop.ps1 before starting again."
+}
+
 if (Test-Path $PidFile) {
     try { $ExistingPid = [int](Get-Content -Raw -LiteralPath $PidFile) } catch { $ExistingPid = 0 }
     $Existing = if ($ExistingPid) { Get-CimInstance Win32_Process -Filter "ProcessId=$ExistingPid" -ErrorAction SilentlyContinue } else { $null }
-    $ExpectedPath = [IO.Path]::GetFullPath($Proxy)
     $MatchesProxy = $Existing -and $Existing.ExecutablePath -and
         [IO.Path]::GetFullPath($Existing.ExecutablePath).Equals($ExpectedPath, [StringComparison]::OrdinalIgnoreCase) -and
         $Existing.CommandLine -match '127\.0\.0\.1:18081'
@@ -185,3 +232,7 @@ if (Get-Process -Id $Process.Id -ErrorAction SilentlyContinue) {
 Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $FingerprintFile -Force -ErrorAction SilentlyContinue
 throw "mcp-auth-proxy did not become healthy within 30 seconds."
+} finally {
+    if ($StartMutexOwned) { $StartMutex.ReleaseMutex() }
+    $StartMutex.Dispose()
+}

@@ -29,7 +29,9 @@ function Download-WithResume([string]$Url, [string]$Destination) {
 }
 
 function Set-DotEnvValue([string]$Path, [string]$Name, [string]$Value) {
-    $Text = if (Test-Path $Path) { Get-Content -Raw -LiteralPath $Path } else { "" }
+    $Text = if (Test-Path $Path) {
+        [IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8)
+    } else { "" }
     $Line = "$Name=$Value"
     $Pattern = "(?m)^\s*" + [regex]::Escape($Name) + "\s*=.*$"
     if ($Text -match $Pattern) {
@@ -137,6 +139,35 @@ if (-not (Test-Path $WeKnoraEnv)) {
 # from being exposed to the LAN while keeping the documented UI port stable.
 Set-DotEnvValue $WeKnoraEnv "APP_PORT" "127.0.0.1:8080"
 Set-DotEnvValue $WeKnoraEnv "FRONTEND_PORT" "127.0.0.1:8088"
+# The checked-out source and the official container images must stay on the
+# same release. Leaving this at upstream's mutable `latest` silently mixes a
+# pinned CLI/source tree with a different backend after a later image pull.
+Set-DotEnvValue $WeKnoraEnv "WEKNORA_VERSION" $WeKnoraVersion
+
+# Upstream v0.7.1 uses restart: always for Redis and Neo4j. That policy can
+# revive manually stopped containers when Docker Desktop starts again. This
+# managed override preserves normal `compose up` behavior while making an
+# explicit `compose stop` survive daemon and Windows restarts.
+$ComposeOverride = Join-Path $WeKnora "docker-compose.override.yml"
+$ManualStartOverride = @"
+services:
+  redis:
+    restart: unless-stopped
+  neo4j:
+    restart: unless-stopped
+"@
+if (Test-Path $ComposeOverride) {
+    $ExistingOverride = [IO.File]::ReadAllText($ComposeOverride, [Text.Encoding]::UTF8)
+    if ($ExistingOverride.Trim() -ne $ManualStartOverride.Trim()) {
+        throw "Existing docker-compose.override.yml is user-managed. Preserve its settings and set Redis/Neo4j restart to unless-stopped before retrying."
+    }
+} else {
+    [IO.File]::WriteAllText(
+        $ComposeOverride,
+        $ManualStartOverride + "`n",
+        [Text.UTF8Encoding]::new($false)
+    )
+}
 
 if ($StartWeKnora) {
     $DistroNames = (& wsl.exe -l -q) -replace "`0", ""

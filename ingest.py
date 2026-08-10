@@ -82,6 +82,9 @@ MEMORY_SAMPLE_LOCK = threading.Lock()
 MEMORY_SAMPLES: dict[str, deque[float]] = {}
 RUNTIME_RESOURCE_CONFIG: dict = {}
 PRINT_LOCK = threading.Lock()
+MAX_MINERU_RESULT_ZIP_BYTES = 2 * 1024**3
+MAX_MINERU_RESULT_FILES = 100_000
+MAX_MINERU_RESULT_EXPANDED_BYTES = 20 * 1024**3
 
 
 def print(*args, **kwargs) -> None:
@@ -823,6 +826,19 @@ def require_permanent_delete_confirmation(action: str) -> None:
     )
 
 
+def require_manual_deletion_sync_confirmation() -> None:
+    if (
+        os.getenv("QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC", "")
+        == "I_UNDERSTAND"
+    ):
+        return
+    raise RuntimeError(
+        "手动删除级联同步会永久删除整份资料的本地文件和远端索引，"
+        "但尚未独立确认。请仅在理解该规则后，在本机.env中设置"
+        "QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC=I_UNDERSTAND。"
+    )
+
+
 def load_settings(config_path: str | Path | None = None) -> dict:
     global RUNTIME_RESOURCE_CONFIG, MIMO_GATE_INITIALIZED, NEO4J_RUNTIME_CONFIG
     load_dotenv(ROOT / ".env")
@@ -924,6 +940,8 @@ def load_settings(config_path: str | Path | None = None) -> dict:
         require_permanent_delete_confirmation(
             "检测到永久删除选项: " + ", ".join(enabled_destructive)
         )
+    if bool((cfg.get("manual_deletions") or {}).get("auto_sync", False)):
+        require_manual_deletion_sync_confirmation()
     return cfg
 
 
@@ -1088,6 +1106,19 @@ def save_state(
     weknora_doc_id: str | None = None,
     metrics: dict | None = None,
 ) -> None:
+    existing_state_row = db.execute(
+        "SELECT state FROM files WHERE sha256=?", (sha,)
+    ).fetchone()
+    existing_state = (
+        str(existing_state_row["state"] or "") if existing_state_row else ""
+    )
+    if existing_state in {"user_delete_pending", "user_deleted"} and state not in {
+        "user_delete_pending",
+        "user_deleted",
+    }:
+        # A stale worker must never resurrect content after the user has
+        # requested or completed permanent exclusion.
+        return
     if metrics is None:
         existing = db.execute(
             "SELECT metrics_json FROM files WHERE sha256=?", (sha,)
@@ -1598,16 +1629,21 @@ def archive_inventory(archive: Path, cfg: dict) -> tuple[int, int]:
             continue
         if record.get("Encrypted") == "+":
             raise RuntimeError("压缩包包含加密文件")
+        if not safe_archive_member(record["Path"]):
+            raise RuntimeError(f"压缩包包含异常路径: {record['Path']}")
+        if record.get("Symbolic Link") or record.get("Hard Link"):
+            raise RuntimeError(f"压缩包包含链接成员: {record['Path']}")
+        count += 1
+        max_files = int(cfg["max_archive_files"])
+        if count > max_files:
+            raise RuntimeError(f"压缩包条目数超过限制: {count} > {max_files}")
         folder = record.get("Folder") == "+" or record.get("Attributes", "").startswith("D")
         if folder:
             continue
-        if not safe_archive_member(record["Path"]):
-            raise RuntimeError(f"压缩包包含异常路径: {record['Path']}")
         try:
             size = int(record["Size"])
         except ValueError as exc:
             raise RuntimeError("压缩包文件大小无法识别") from exc
-        count += 1
         expanded += size
     max_files = int(cfg["max_archive_files"])
     max_bytes = int(float(cfg["max_expanded_gb"]) * 1024**3)
@@ -1764,8 +1800,6 @@ def classify_inbox(cfg: dict) -> ClassificationStats:
     work = cfg["folders"]["work"]
     classification = cfg["classification"]
     executable = classification["archive_executable"]
-    if not executable.is_file():
-        raise RuntimeError(f"7-Zip不存在: {executable}")
     reparse_items = sorted(
         [
             path
@@ -1789,6 +1823,8 @@ def classify_inbox(cfg: dict) -> ClassificationStats:
         and path.name != ".gitkeep"
         and archive_suffix(path, classification)
     )
+    if queue and not executable.is_file():
+        raise RuntimeError(f"检测到压缩包但7-Zip不存在: {executable}")
     queued = {path.resolve() for path, _ in queue}
     while queue:
         archive, depth = queue.popleft()
@@ -2150,6 +2186,9 @@ def download_mineru_zip(
     failures: list[str] = []
     for attempt in range(1, max(1, attempts) + 1):
         resume_at = partial.stat().st_size if partial.is_file() else 0
+        if resume_at > MAX_MINERU_RESULT_ZIP_BYTES:
+            partial.unlink(missing_ok=True)
+            raise RuntimeError("MinerU结果压缩包超过安全下载上限")
         headers = {"Accept-Encoding": "identity"}
         if resume_at:
             headers["Range"] = f"bytes={resume_at}-"
@@ -2167,19 +2206,28 @@ def download_mineru_zip(
                 response.raise_for_status()
                 append = bool(resume_at and response.status_code == 206)
                 mode = "ab" if append else "wb"
+                content_length = int(response.headers.get("Content-Length") or 0)
+                expected_size = (resume_at if append else 0) + content_length
+                if content_length and expected_size > MAX_MINERU_RESULT_ZIP_BYTES:
+                    partial.unlink(missing_ok=True)
+                    raise RuntimeError("MinerU结果压缩包超过安全下载上限")
+                written = resume_at if append else 0
                 with partial.open(mode) as handle:
                     for block in response.iter_content(1024 * 1024):
                         if block:
+                            written += len(block)
+                            if written > MAX_MINERU_RESULT_ZIP_BYTES:
+                                handle.close()
+                                partial.unlink(missing_ok=True)
+                                raise RuntimeError("MinerU结果压缩包超过安全下载上限")
                             handle.write(block)
             target.unlink(missing_ok=True)
             os.replace(partial, target)
             try:
-                with zipfile.ZipFile(target) as archive:
-                    corrupt = archive.testzip()
-                    if corrupt:
-                        raise zipfile.BadZipFile(
-                            f"archive member failed CRC: {corrupt}"
-                        )
+                validate_mineru_zip(target)
+            except RuntimeError:
+                target.unlink(missing_ok=True)
+                raise
             except (OSError, zipfile.BadZipFile) as exc:
                 target.unlink(missing_ok=True)
                 failures.append(f"invalid zip: {type(exc).__name__}")
@@ -2204,6 +2252,45 @@ def download_mineru_zip(
     )
 
 
+def validate_mineru_zip(archive_path: Path, output: Path | None = None) -> None:
+    """Reject unsafe or unexpectedly large MinerU result archives."""
+    expanded_bytes = 0
+    root = output.resolve() if output is not None else None
+    with zipfile.ZipFile(archive_path) as archive:
+        members = archive.infolist()
+        if len(members) > MAX_MINERU_RESULT_FILES:
+            raise RuntimeError("MinerU结果压缩包文件数量超过安全上限")
+        for member in members:
+            raw_name = member.filename.replace("\\", "/")
+            pure = PurePosixPath(raw_name)
+            if (
+                not raw_name
+                or pure.is_absolute()
+                or re.match(r"^[A-Za-z]:", raw_name)
+                or ".." in pure.parts
+            ):
+                raise RuntimeError(f"MinerU结果包含不安全路径: {member.filename}")
+            file_type = (member.external_attr >> 16) & 0o170000
+            if file_type == stat.S_IFLNK:
+                raise RuntimeError(f"MinerU结果包含符号链接: {member.filename}")
+            expanded_bytes += max(0, int(member.file_size))
+            if expanded_bytes > MAX_MINERU_RESULT_EXPANDED_BYTES:
+                raise RuntimeError("MinerU结果压缩包展开大小超过安全上限")
+            if root is not None:
+                target = (output / Path(*pure.parts)).resolve()
+                if target != root and root not in target.parents:
+                    raise RuntimeError(
+                        f"MinerU结果包含不安全路径: {member.filename}"
+                    )
+
+
+def extract_mineru_zip(archive_path: Path, output: Path) -> None:
+    validate_mineru_zip(archive_path, output)
+    output.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive_path) as archive:
+        archive.extractall(output)
+
+
 def download_results(
     items: list[dict], parts: list[SourcePart], job: Path
 ) -> list[tuple[SourcePart, Path]]:
@@ -2212,6 +2299,7 @@ def download_results(
     for part in parts:
         by_name.setdefault(part.path.name, []).append(part)
     markdowns = []
+    seen_parts: set[str] = set()
     for index, item in enumerate(items, 1):
         data_id = item.get("data_id")
         matches = (
@@ -2222,21 +2310,22 @@ def download_results(
         if len(matches) != 1:
             raise RuntimeError(f"MinerU结果无法唯一对应源分卷: {item}")
         part = matches[0]
+        identity = part_data_id(part)
+        if identity in seen_parts:
+            raise RuntimeError(f"MinerU返回了重复分卷结果: {part.path.name}")
+        seen_parts.add(identity)
         archive = job / f"result-{index}.zip"
         download_mineru_zip(item["full_zip_url"], archive)
         out = job / f"result-{index}"
-        with zipfile.ZipFile(archive) as z:
-            root = out.resolve()
-            for member in z.infolist():
-                target = (out / member.filename).resolve()
-                if target != root and root not in target.parents:
-                    raise RuntimeError(f"MinerU结果包含不安全路径: {member.filename}")
-            z.extractall(out)
+        extract_mineru_zip(archive, out)
         found = list(out.rglob("full.md"))
-        if not found:
-            raise RuntimeError(f"MinerU结果中没有full.md: {archive}")
+        if len(found) != 1:
+            raise RuntimeError(
+                f"MinerU结果必须且只能包含一个full.md: {archive}"
+            )
         markdowns.append((part, found[0]))
-    if len(markdowns) != len(parts):
+    expected_parts = {part_data_id(part) for part in parts}
+    if len(markdowns) != len(parts) or seen_parts != expected_parts:
         raise RuntimeError(
             f"MinerU返回分卷数不一致: 期望{len(parts)}，实际{len(markdowns)}"
         )
@@ -2254,18 +2343,12 @@ def download_recovered_results(
         archive = job / f"recovered-result-{index}.zip"
         download_mineru_zip(item["full_zip_url"], archive)
         out = job / f"recovered-result-{index}"
-        with zipfile.ZipFile(archive) as zipped:
-            root = out.resolve()
-            for member in zipped.infolist():
-                target = (out / member.filename).resolve()
-                if target != root and root not in target.parents:
-                    raise RuntimeError(
-                        f"MinerU恢复结果包含不安全路径: {member.filename}"
-                    )
-            zipped.extractall(out)
+        extract_mineru_zip(archive, out)
         found = list(out.rglob("full.md"))
-        if not found:
-            raise RuntimeError(f"MinerU恢复结果中没有full.md: {archive}")
+        if len(found) != 1:
+            raise RuntimeError(
+                f"MinerU恢复结果必须且只能包含一个full.md: {archive}"
+            )
         file_name = str(item.get("file_name") or original_source.name)
         page_match = re.search(r"\.part-(\d+)-\d+\.pdf$", file_name, re.I)
         start_page = max(0, int(page_match.group(1)) - 1) if page_match else index - 1
@@ -3995,7 +4078,7 @@ def classify_group(
         group_name, parsed, class_cfg
     )
     result = rule_result
-    if needs_mimo:
+    if needs_mimo and bool(cfg["ollama"]["mimo"].get("enabled", False)):
         result = mimo_classification(
             rule_result,
             candidates,
@@ -4048,14 +4131,18 @@ def stable_sha256(source: Path) -> str:
     return digest
 
 
+def source_path_token(source: Path) -> str:
+    """Short stable path identity used to isolate equal-byte source instances."""
+    normalized = str(source.resolve()).casefold().encode("utf-8", errors="surrogatepass")
+    return hashlib.sha256(normalized).hexdigest()[:10]
+
+
 def recorded_source_digest(
     db: sqlite3.Connection,
     source: Path,
     group_id: str = "",
 ) -> str:
     """Return the immutable recorded digest even when a historical source is gone."""
-    if source.exists():
-        return stable_sha256(source)
     row = None
     if group_id:
         row = db.execute(
@@ -4063,6 +4150,10 @@ def recorded_source_digest(
             WHERE group_id=? AND source_path=?""",
             (group_id, str(source)),
         ).fetchone()
+        if row is not None:
+            return str(row["sha256"])
+    if source.exists():
+        return stable_sha256(source)
     if row is None:
         row = db.execute(
             """SELECT sha256 FROM files
@@ -4083,6 +4174,10 @@ def delete_source_with_audit(
     """Permanently delete only after content and retained Markdown are verified."""
     if not source.exists():
         return
+    # Keep the irreversible safety interlock at the deletion primitive as well
+    # as at configuration/CLI entry points.  This prevents a newly added call
+    # path from silently bypassing the user's explicit confirmation.
+    require_permanent_delete_confirmation(reason)
     if not canonical.is_file() or not markdown_body(canonical).strip():
         raise RuntimeError("保留Markdown缺失或正文为空，拒绝删除源文件")
     markdown_digest = stable_sha256(canonical)
@@ -4164,39 +4259,80 @@ def register_group_files(
     sources: list[Path],
     digests: dict[Path, str] | None = None,
 ) -> bool:
-    # A source file can legitimately be shared by more than one logical group.
-    # File-level state therefore cannot protect a group that the user deleted.
-    # Refuse to recreate its group-file links even if that shared source remains.
-    if permanent_group_exclusion_state(db, group_id):
-        return False
     digests = digests or {source: stable_sha256(source) for source in sources}
-    db.execute(
-        """INSERT OR IGNORE INTO groups(group_id,group_name,state,updated_at)
-        VALUES(?,?,?,?)""",
-        (group_id, group_id, "queued", int(time.time())),
-    )
-    for source in sources:
+    # Serialize the duplicate check with registration. Two group workers may
+    # discover equal bytes at the same time; a check outside this transaction
+    # would let both attach mutable state to the legacy SHA primary key.
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        # File-level state cannot protect a group that the user deleted. Refuse
+        # to recreate its links even if a shared historical source remains.
+        if permanent_group_exclusion_state(db, group_id):
+            db.rollback()
+            return False
+        reject_active_duplicate_source_instances(db, sources, digests)
         db.execute(
-            """INSERT OR IGNORE INTO files(
-                sha256,source_path,state,error,updated_at,metrics_json
-            ) VALUES(?,?,?,?,?,?)""",
-            (
-                digests[source],
-                str(source),
-                "queued",
-                "",
-                int(time.time()),
-                "{}",
-            ),
+            """INSERT OR IGNORE INTO groups(group_id,group_name,state,updated_at)
+            VALUES(?,?,?,?)""",
+            (group_id, group_id, "queued", int(time.time())),
         )
-        db.execute(
-            """INSERT INTO group_files(group_id,sha256,source_path)
-            VALUES(?,?,?) ON CONFLICT(group_id,source_path)
-            DO UPDATE SET sha256=excluded.sha256""",
-            (group_id, digests[source], str(source)),
-        )
-    db.commit()
+        for source in sources:
+            db.execute(
+                """INSERT OR IGNORE INTO files(
+                    sha256,source_path,state,error,updated_at,metrics_json
+                ) VALUES(?,?,?,?,?,?)""",
+                (
+                    digests[source],
+                    str(source),
+                    "queued",
+                    "",
+                    int(time.time()),
+                    "{}",
+                ),
+            )
+            db.execute(
+                """INSERT INTO group_files(group_id,sha256,source_path)
+                VALUES(?,?,?) ON CONFLICT(group_id,source_path)
+                DO UPDATE SET sha256=excluded.sha256""",
+                (group_id, digests[source], str(source)),
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     return True
+
+
+def reject_active_duplicate_source_instances(
+    db: sqlite3.Connection,
+    sources: list[Path],
+    digests: dict[Path, str],
+) -> None:
+    """Fail safely until the legacy SHA-primary-key schema is migrated."""
+    current_by_digest: dict[str, list[Path]] = {}
+    for source in sources:
+        current_by_digest.setdefault(digests[source], []).append(source)
+    for digest, paths in current_by_digest.items():
+        if len(paths) > 1:
+            raise RuntimeError(
+                "同一资料组包含字节完全相同的重复源文件；请保留一份后重试: "
+                + ", ".join(path.name for path in paths)
+            )
+        row = db.execute(
+            "SELECT source_path FROM files WHERE sha256=?",
+            (digest,),
+        ).fetchone()
+        if not row:
+            continue
+        registered = Path(row["source_path"])
+        if (
+            registered.exists()
+            and registered.resolve() != paths[0].resolve()
+        ):
+            raise RuntimeError(
+                "发现两个仍存在但字节完全相同的源文件；当前数据库版本不能安全并发追踪，"
+                f"请保留一份后重试: {registered} | {paths[0]}"
+            )
 
 
 def pending_group_for_sources(
@@ -4852,6 +4988,11 @@ def save_group_state(
     raw_doc_id: str | None = None,
     commit: bool = True,
 ) -> None:
+    existing_exclusion = permanent_group_exclusion_state(db, group_id)
+    if existing_exclusion and state not in PERMANENT_GROUP_EXCLUSION_STATES:
+        # Concurrent/stale indexing work cannot revive a group after a user
+        # deletion or a permanent non-RAG classification decision.
+        return
     classification_json = None
     if isinstance(classification, DocumentClassification):
         classification_json = json.dumps(
@@ -5139,8 +5280,6 @@ def weknora_find_existing(
     doc_id = str(exact[0].get("id") or "")
     if not doc_id:
         raise RuntimeError(f"WeKnora同名文档缺少ID: {remote_file_name}")
-    if not layer and not group_id and classification is None:
-        return doc_id
     document = weknora_document(
         doc_id,
         md_path,
@@ -5494,6 +5633,7 @@ def detect_manual_deletions(
                     layer for layer, _ in missing_layers
                 ),
                 "state": str(row["state"] or ""),
+                "group_updated_at": str(row["updated_at"] or 0),
             }
         )
 
@@ -5510,15 +5650,16 @@ def detect_manual_deletions(
         JOIN group_files gf ON gf.group_id=g.group_id
         LEFT JOIN files f ON f.sha256=gf.sha256
         WHERE g.state IN (
-            'classified','classification_pending','retry_wait','failed'
+            'classified','classification_pending','retry_wait','failed','completed'
         )"""
     ).fetchall()
     ignored_file_states = {
-        "completed",
         "excluded_completed",
         "user_delete_pending",
         "user_deleted",
     }
+    if cfg["cleanup"].get("permanently_delete_source_after_search", False):
+        ignored_file_states.add("completed")
     for row in source_rows:
         if str(row["file_state"] or "") in ignored_file_states:
             continue
@@ -5541,6 +5682,7 @@ def detect_manual_deletions(
                 "group_name": str(row["group_name"] or ""),
                 "source_path": str(candidates[0]),
                 "state": str(row["state"] or ""),
+                "group_updated_at": str(row["updated_at"] or 0),
             },
         )
 
@@ -5600,6 +5742,7 @@ def detect_manual_deletions(
             "group_name": str(members[0]["group_name"] or ""),
             "source_path": str(candidates[0]),
             "state": str(members[0]["state"] or ""),
+            "group_updated_at": str(members[0]["updated_at"] or 0),
         }
 
     payload = {
@@ -5639,8 +5782,32 @@ def sync_manual_deletions(
     if not selection_path.is_file():
         raise RuntimeError(f"手动删除差异文件不存在: {selection_path}")
     if not dry_run:
-        require_permanent_delete_confirmation("手动删除同步")
+        require_manual_deletion_sync_confirmation()
     payload = json.loads(selection_path.read_text("utf-8"))
+    if payload.get("detection") == "live_state_db_and_filesystem":
+        for collection, path_key in (
+            (payload.get("newly_missing_markdown", []), "markdown_path"),
+            (payload.get("newly_missing_sources", []), "source_path"),
+        ):
+            for item in collection:
+                group_id = str(item.get("group_id") or "")
+                snapshot = int(item.get("group_updated_at") or 0)
+                trigger_path = Path(str(item.get(path_key) or ""))
+                current = db.execute(
+                    "SELECT updated_at FROM groups WHERE group_id=?", (group_id,)
+                ).fetchone()
+                if not current or snapshot <= 0:
+                    raise RuntimeError(
+                        f"手动删除差异缺少可验证快照: {group_id or '(empty)'}"
+                    )
+                if int(current["updated_at"] or 0) != snapshot:
+                    raise RuntimeError(
+                        f"资料组在检测后已变化，拒绝使用过期删除差异: {group_id}"
+                    )
+                if not str(trigger_path) or trigger_path.is_file():
+                    raise RuntimeError(
+                        f"删除触发路径已恢复或被替换，拒绝级联删除: {trigger_path}"
+                    )
     markdown_selected = {
         str(item.get("group_id") or "")
         for item in payload.get("newly_missing_markdown", [])
@@ -5894,32 +6061,55 @@ def sync_manual_deletions(
             WHERE gf.group_id=?""",
             (group_id,),
         ).fetchall()
-        paths_to_delete: set[tuple[Path, str]] = set()
+        paths_to_delete: dict[tuple[Path, str], set[str]] = {}
+
+        def add_delete_path(candidate: Path, kind: str, digest: str = "") -> None:
+            paths_to_delete.setdefault((candidate, kind), set())
+            if digest:
+                paths_to_delete[(candidate, kind)].add(digest)
+
         if group["markdown_path"]:
-            paths_to_delete.add((Path(group["markdown_path"]), "markdown"))
+            add_delete_path(Path(group["markdown_path"]), "markdown")
         if group["raw_path"]:
-            paths_to_delete.add((Path(group["raw_path"]), "markdown"))
+            add_delete_path(Path(group["raw_path"]), "markdown")
         for member in members:
             digest = str(member["sha256"])
             if digest not in shared_shas:
                 if member["source_path"]:
-                    paths_to_delete.add((Path(member["source_path"]), "source"))
+                    add_delete_path(Path(member["source_path"]), "source", digest)
                 if member["canonical_source"]:
-                    paths_to_delete.add(
-                        (Path(member["canonical_source"]), "source")
+                    add_delete_path(
+                        Path(member["canonical_source"]), "source", digest
                     )
             if member["file_markdown"]:
-                paths_to_delete.add(
-                    (Path(member["file_markdown"]), "markdown")
-                )
-        for candidate, kind in sorted(
-            paths_to_delete, key=lambda item: str(item[0]).casefold()
+                add_delete_path(Path(member["file_markdown"]), "markdown")
+        # Do not destroy the recoverable local copy while a remote index still
+        # failed to delete.  The pending audit can then retry idempotently.
+        if errors:
+            paths_to_delete.clear()
+        for (candidate, kind), expected_digests in sorted(
+            paths_to_delete.items(), key=lambda item: str(item[0][0]).casefold()
         ):
             if not candidate.exists():
                 continue
             if not candidate.is_file() or not allowed_file(candidate):
                 errors.append(f"拒绝删除允许目录外路径: {candidate}")
                 continue
+            if kind == "source":
+                if len(expected_digests) != 1:
+                    errors.append(f"源文件存在冲突摘要，拒绝删除: {candidate}")
+                    continue
+                try:
+                    current_digest = stable_sha256(candidate)
+                except (OSError, RuntimeError) as exc:
+                    errors.append(f"源文件删除前摘要无法确认 {candidate}: {exc}")
+                    continue
+                expected_digest = next(iter(expected_digests))
+                if current_digest != expected_digest:
+                    errors.append(
+                        f"源文件在检测后已被替换，保留新内容: {candidate}"
+                    )
+                    continue
             try:
                 candidate.unlink()
                 if kind == "source":
@@ -6086,17 +6276,54 @@ def auto_sync_manual_deletions(
     db: sqlite3.Connection,
 ) -> dict[str, int]:
     """Apply the user's any-side deletion rule at safe round boundaries."""
+    if not bool((cfg.get("manual_deletions") or {}).get("auto_sync", False)):
+        return {
+            "detected_groups": 0,
+            "historical_closure_groups": 0,
+            "groups_completed": 0,
+            "groups_pending": 0,
+            "reconciled_files": 0,
+        }
+    require_manual_deletion_sync_confirmation()
     selection_path = (
         cfg["folders"]["work"] / "manual-deletion-auto-current.json"
     )
+    pending_ids = [
+        str(row["group_id"])
+        for row in db.execute(
+            "SELECT group_id FROM groups WHERE state='user_delete_pending'"
+        ).fetchall()
+    ]
+    pending_result = {"groups_completed": 0, "groups_pending": 0}
+    if pending_ids:
+        atomic_write(
+            selection_path,
+            json.dumps(
+                {
+                    "generated_at": datetime.now().astimezone().isoformat(),
+                    "detection": "pending_manual_deletion_resume",
+                    "newly_missing_markdown": [],
+                    "newly_missing_sources": [
+                        {"group_id": group_id} for group_id in pending_ids
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+        with single_instance(".manual-deletion-sync.lock"):
+            pending_result = sync_manual_deletions(
+                cfg, db, selection_path, dry_run=False
+            )
     detected = detect_manual_deletions(
         cfg, db, selection_path, grace_seconds=60
     )
     result = {
         "detected_groups": int(detected["affected_groups"]),
         "historical_closure_groups": 0,
-        "groups_completed": 0,
-        "groups_pending": 0,
+        "groups_completed": int(pending_result["groups_completed"]),
+        "groups_pending": int(pending_result["groups_pending"]),
         "reconciled_files": 0,
     }
     if result["detected_groups"]:
@@ -6104,8 +6331,8 @@ def auto_sync_manual_deletions(
             synced = sync_manual_deletions(
                 cfg, db, selection_path, dry_run=False
             )
-        result["groups_completed"] = int(synced["groups_completed"])
-        result["groups_pending"] = int(synced["groups_pending"])
+        result["groups_completed"] += int(synced["groups_completed"])
+        result["groups_pending"] += int(synced["groups_pending"])
     closure_rows = db.execute(
         """SELECT DISTINCT active.group_id
         FROM groups deleted
@@ -6229,7 +6456,6 @@ def weknora_verify(
         flags=re.IGNORECASE,
     )
     queries.extend((normalized_stem, source.stem))
-    route_has_hits = False
     for query in dict.fromkeys(item for item in queries if item):
         current_values = {**values, "query": query}
         command = list(cfg["search_command"])
@@ -6242,16 +6468,11 @@ def weknora_verify(
             command.append("--no-vector")
         searched = run_command(command, current_values, md_path.parent)
         hits = searched.get("data") or []
-        route_has_hits = route_has_hits or bool(hits)
         if any(hit.get("knowledge_id") == doc_id for hit in hits):
             return
-    if route_has_hits:
-        print(
-            f"WeKnora目标分块存在；{mode}检索返回非空，"
-            "目标文档未进入全库Top结果但不再判为索引失败"
-        )
-        return
-    raise RuntimeError(f"WeKnora目标分块存在，但{mode}检索结果为空")
+    raise RuntimeError(
+        f"WeKnora目标分块存在，但{mode}检索未命中当前文档，拒绝把其他文档的命中当作成功"
+    )
 
 
 def full_route_check_due(cfg: dict) -> bool:
@@ -6784,26 +7005,36 @@ def process(
     defer_index: bool = False,
     mineru_preferred_slot: str | None = None,
 ) -> Path | None:
-    row = db.execute(
+    path_row = db.execute(
         "SELECT * FROM files WHERE source_path=? ORDER BY updated_at DESC LIMIT 1",
         (str(source),),
     ).fetchone()
-    if not row or not decode_batch_ids(row["batch_id"]):
+    if not path_row or not decode_batch_ids(path_row["batch_id"]):
         wait_until_stable(source)
-    digest = row["sha256"] if row else sha256(source)
-    row = row or db.execute(
+    digest = stable_sha256(source)
+    row = (
+        path_row
+        if path_row and str(path_row["sha256"]) == digest
+        else db.execute(
         "SELECT * FROM files WHERE sha256=?", (digest,)
-    ).fetchone()
+        ).fetchone()
+    )
+    if row and str(row["source_path"] or "") != str(source):
+        # The files table is content-addressed.  Never reuse another path's
+        # mutable batch/Markdown state merely because the bytes are identical.
+        row = None
     if defer_index and row and row["state"] == "completed":
         # A byte-identical source can legitimately participate in a different
         # question/answer group. Its old canonical Markdown already contains
         # the previous group's merge, so it must not be reused as parsed input.
         row = None
-    job = cfg["folders"]["work"] / digest[:16]
+    instance_token = source_path_token(source)
+    job = cfg["folders"]["work"] / f"{digest[:16]}-{instance_token}"
     final = (
         Path(row["markdown_path"])
         if row and row["markdown_path"]
-        else cfg["folders"]["markdown"] / f"{source.stem}-{digest[:10]}.md"
+        else cfg["folders"]["markdown"]
+        / f"{source.stem}-{digest[:10]}-{instance_token}.md"
     )
     batch_ids = decode_batch_ids(row["batch_id"] if row else None)
     doc_id = row["weknora_doc_id"] if row else None
@@ -7156,6 +7387,9 @@ def cleanup_verified_sources(
     db: sqlite3.Connection,
 ) -> list[str]:
     errors = []
+    delete_enabled = bool(
+        cfg["cleanup"].get("permanently_delete_source_after_search", False)
+    )
     for source in sources:
         manifest_row = db.execute(
             """SELECT sha256 FROM group_files
@@ -7201,12 +7435,30 @@ def cleanup_verified_sources(
                 error="源文件内容已变化；旧内容索引保留，新内容未删除",
                 weknora_doc_id=parent_doc_id,
             )
+            existing_new = db.execute(
+                "SELECT source_path FROM files WHERE sha256=?", (digest,)
+            ).fetchone()
+            if existing_new is None or str(existing_new["source_path"] or "") == str(
+                source
+            ):
+                save_state(
+                    db,
+                    digest,
+                    source,
+                    "queued",
+                    error="检测到同路径新内容，等待作为新资料处理",
+                )
+            else:
+                print(
+                    "检测到同内容的另一来源路径；当前副本保留，"
+                    f"等待重复内容人工确认: {source}"
+                )
             print(
                 f"源文件内容在处理期间发生变化，保留新文件等待下次处理: "
                 f"{source.name}"
             )
             continue
-        if cfg["cleanup"]["permanently_delete_source_after_search"]:
+        if delete_enabled:
             try:
                 delete_source_with_audit(
                     db,
@@ -7218,7 +7470,13 @@ def cleanup_verified_sources(
                 )
             except (OSError, RuntimeError) as exc:
                 errors.append(f"{source.name}: {exc}")
-        state = "completed" if not source.exists() else "cleanup_pending"
+        # A retained source is the requested terminal state when deletion is
+        # disabled; it must not become an endless cleanup retry candidate.
+        state = (
+            "cleanup_pending"
+            if delete_enabled and source.exists()
+            else "completed"
+        )
         metric_row = db.execute(
             "SELECT metrics_json FROM files WHERE sha256=?", (digest,)
         ).fetchone()
@@ -7275,6 +7533,14 @@ def is_retryable_parse_error(error: str) -> bool:
         "Temporary failure",
         "Ollama临时失败",
         "本地模型连续两次没有返回合法JSON",
+        "408 Request Timeout",
+        "425 Too Early",
+        "429 Too Many Requests",
+        "500 Server Error",
+        "502 Bad Gateway",
+        "503 Service Unavailable",
+        "504 Gateway Timeout",
+        "MiMo全部已配置Key暂不可用",
     )
     return any(marker.casefold() in error.casefold() for marker in retryable_markers)
 
@@ -7559,7 +7825,10 @@ def process_group(
                 "SELECT * FROM files WHERE sha256=?", (source_digest,)
             ).fetchone()
             parse_error = failed_row["error"] if failed_row else "解析未返回Markdown"
-            if is_retryable_parse_error(parse_error):
+            if (
+                is_retryable_parse_error(parse_error)
+                or not is_permanent_source_parse_error(parse_error)
+            ):
                 retry_state = (
                     "parsing"
                     if failed_row and decode_batch_ids(failed_row["batch_id"])
@@ -7729,9 +7998,12 @@ def process_group(
                     "SELECT * FROM files WHERE sha256=?", (digest,)
                 ).fetchone()
                 try:
-                    if cfg["document_classification"].get(
+                    delete_other_source = bool(
+                        cfg["document_classification"].get(
                         "delete_other_source_after_markdown", False
-                    ) and source.exists():
+                        )
+                    )
+                    if delete_other_source and source.exists():
                         delete_source_with_audit(
                             db,
                             source,
@@ -7781,7 +8053,11 @@ def process_group(
                 + (
                     "源文件等待重试删除"
                     if cleanup_errors
-                    else "源文件已永久删除"
+                    else (
+                        "源文件已永久删除"
+                        if delete_other_source
+                        else "源文件按配置保留"
+                    )
                 )
             )
             return
@@ -8562,14 +8838,8 @@ def process_group_lane(
         try:
             digests = {}
             for source in sources:
-                known = db.execute(
-                    """SELECT sha256 FROM files WHERE source_path=?
-                    ORDER BY updated_at DESC LIMIT 1""",
-                    (str(source),),
-                ).fetchone()
-                digests[source] = (
-                    known["sha256"] if known else stable_sha256(source)
-                )
+                digests[source] = stable_sha256(source)
+            reject_active_duplicate_source_instances(db, sources, digests)
             pending_group = pending_group_for_sources(db, sources, digests)
             group_id = (
                 pending_group["group_id"]
@@ -8595,10 +8865,10 @@ def process_group_lane(
                 sources,
                 cfg,
                 db,
-            mineru_preferred_slot=token_slot,
-            submit_index_task=submit_index_task,
-            index_gate=index_gate,
-        )
+                mineru_preferred_slot=token_slot,
+                submit_index_task=submit_index_task,
+                index_gate=index_gate,
+            )
         except (RuntimeError, OSError, sqlite3.Error) as exc:
             print(f"资料组暂未完成并保留在inbox: {group_name}: {exc}")
         counts = {
@@ -8679,7 +8949,8 @@ def processing_candidates(cfg: dict, db: sqlite3.Connection) -> list[Path]:
     rows_by_path = {
         row["source_path"]: row
         for row in db.execute(
-            "SELECT source_path,state,error,metrics_json,updated_at FROM files"
+            "SELECT sha256,source_path,state,error,metrics_json,updated_at "
+            "FROM files ORDER BY updated_at"
         ).fetchall()
     }
     candidates: list[tuple[tuple[int, int, int, str], Path]] = []
@@ -8690,7 +8961,14 @@ def processing_candidates(cfg: dict, db: sqlite3.Connection) -> list[Path]:
             continue
         row = rows_by_path.get(str(source))
         if row and row["state"] in terminal_states:
-            continue
+            try:
+                if stable_sha256(source) == str(row["sha256"]):
+                    continue
+            except (OSError, RuntimeError):
+                # A file still being copied remains a candidate but will be
+                # safely deferred by the stable-hash check at the worker entry.
+                pass
+            row = None
         pages = 0
         candidate_metrics: dict = {}
         if row and row["metrics_json"]:
@@ -9008,6 +9286,13 @@ def prequeue_mineru_source(
             ORDER BY updated_at DESC LIMIT 1""",
             (str(source),),
         ).fetchone()
+        wait_until_stable(source)
+        digest = stable_sha256(source)
+        reject_active_duplicate_source_instances(db, [source], {source: digest})
+        if row and str(row["sha256"]) != digest:
+            row = None
+        if row and str(row["source_path"] or "") != str(source):
+            row = None
         existing_batches = decode_batch_ids(row["batch_id"] if row else None)
         if existing_batches:
             print(
@@ -9022,13 +9307,15 @@ def prequeue_mineru_source(
                 f"{source.name}"
             )
             return "already"
-        wait_until_stable(source)
-        digest = row["sha256"] if row else sha256(source)
         row = row or db.execute(
             "SELECT * FROM files WHERE sha256=?", (digest,)
         ).fetchone()
+        if row and str(row["source_path"] or "") != str(source):
+            row = None
 
-        job = cfg["folders"]["work"] / digest[:16]
+        job = cfg["folders"]["work"] / (
+            f"{digest[:16]}-{source_path_token(source)}"
+        )
         clean_job(job, cfg["folders"]["work"])
         parts = split_source(source, job, cfg["mineru"])
         batches: list[MinerUBatch] = []
@@ -11312,12 +11599,14 @@ def migrate_classified_markdown(
                     other_cleanup_errors = []
                     for item in source_rows:
                         source = Path(item["source_path"])
-                        if source.exists():
-                            digest = stable_sha256(source)
-                            current = db.execute(
-                                "SELECT * FROM files WHERE sha256=?",
-                                (digest,),
-                            ).fetchone()
+                        digest = str(item["sha256"] or "")
+                        current = db.execute(
+                            "SELECT * FROM files WHERE sha256=?",
+                            (digest,),
+                        ).fetchone()
+                        if source.exists() and cfg[
+                            "document_classification"
+                        ].get("delete_other_source_after_markdown", False):
                             try:
                                 delete_source_with_audit(
                                     db,
@@ -11341,16 +11630,22 @@ def migrate_classified_markdown(
                                 other_cleanup_errors.append(
                                     f"{source.name}: {cleanup_error}"
                                 )
-                            save_state(
-                                db,
-                                digest,
-                                source,
-                                file_state,
-                                current["batch_id"] if current else None,
-                                str(target),
-                                error=file_error,
-                                metrics=file_metrics(current),
+                        else:
+                            file_state = "excluded_completed"
+                            file_error = (
+                                "未入RAG；"
+                                f"markdown_sha256={markdown_digest}"
                             )
+                        save_state(
+                            db,
+                            digest,
+                            source,
+                            file_state,
+                            current["batch_id"] if current else None,
+                            str(target),
+                            error=file_error,
+                            metrics=file_metrics(current),
+                        )
                 record["migration_phase"] = (
                     "completed"
                     if delete_old_indexes
@@ -11593,13 +11888,50 @@ def main() -> None:
         help="同时检索父块、子块和原文层，全部使用向量＋BM25",
     )
     args = parser.parse_args()
+    for option, value in (
+        ("--search", args.search),
+        ("--sync-manual-deletions", args.sync_manual_deletions),
+        ("--detect-manual-deletions", args.detect_manual_deletions),
+    ):
+        if value is not None and not str(value).strip():
+            parser.error(f"{option} requires a non-empty value")
+    primary_modes = {
+        "--supervise": args.supervise,
+        "--worker": args.worker,
+        "--status": args.status,
+        "--classify-only": args.classify_only,
+        "--prequeue-only": args.prequeue_only,
+        "--migrate-indexes": args.migrate_indexes,
+        "--migrate-classification": args.migrate_classification,
+        "--migrate-content-structure": args.migrate_content_structure,
+        "--classification-dry-run": args.classification_dry_run,
+        "--recover-missing-sources": args.recover_missing_sources,
+        "--index-recovered": args.index_recovered,
+        "--repair-state": args.repair_state,
+        "--detect-manual-deletions": args.detect_manual_deletions is not None,
+        "--sync-manual-deletions": args.sync_manual_deletions is not None,
+        "--search": args.search is not None,
+    }
+    selected_modes = [name for name, selected in primary_modes.items() if selected]
+    if len(selected_modes) > 1:
+        parser.error(
+            "choose only one primary operation: " + ", ".join(selected_modes)
+        )
+    if args.manual_deletion_dry_run and args.sync_manual_deletions is None:
+        parser.error(
+            "--manual-deletion-dry-run requires --sync-manual-deletions"
+        )
+    if args.delete_old_indexes and not args.migrate_classification:
+        parser.error("--delete-old-indexes requires --migrate-classification")
+    if args.migration_group and not args.migrate_content_structure:
+        parser.error("--migration-group requires --migrate-content-structure")
     cfg = load_settings(args.config)
     if args.supervise and not args.worker:
         supervise_ingest(cfg)
         return
     db = db_open()
     reconcile_appledouble_history(db)
-    if args.detect_manual_deletions:
+    if args.detect_manual_deletions is not None:
         with single_instance(".manual-deletion-detect.lock"):
             result = detect_manual_deletions(
                 cfg,
@@ -11609,7 +11941,7 @@ def main() -> None:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         db.close()
         return
-    if args.sync_manual_deletions:
+    if args.sync_manual_deletions is not None:
         with single_instance(".manual-deletion-sync.lock"):
             result = sync_manual_deletions(
                 cfg,
@@ -11650,7 +11982,7 @@ def main() -> None:
             )
         print(json.dumps(result, ensure_ascii=False))
         return
-    if args.search:
+    if args.search is not None:
         results = parallel_hybrid_search(args.search, cfg["weknora"])
         print(json.dumps(results, ensure_ascii=False, indent=2))
         return
@@ -11997,7 +12329,7 @@ def main() -> None:
             known_by_path = {
                 row["source_path"]: row
                 for row in db.execute(
-                    "SELECT source_path,batch_id,state FROM files"
+                    "SELECT source_path,sha256,batch_id,state FROM files"
                 ).fetchall()
             }
             downstream_states = {
@@ -12007,12 +12339,21 @@ def main() -> None:
                 "user_delete_pending", "user_deleted",
             }
             prequeue_needed = []
+            current_digest_owners: dict[str, Path] = {}
             for path in mineru_files:
                 known = known_by_path.get(str(path))
+                current_digest = stable_sha256(path)
+                duplicate_owner = current_digest_owners.get(current_digest)
+                if duplicate_owner and duplicate_owner.resolve() != path.resolve():
+                    raise SystemExit(
+                        "发现两个字节完全相同的待处理源文件；为避免共享批次和状态，"
+                        f"请只保留一份后重试: {duplicate_owner} | {path}"
+                    )
+                current_digest_owners[current_digest] = path
                 if known and (
                     decode_batch_ids(known["batch_id"])
                     or known["state"] in downstream_states
-                ):
+                ) and str(known["sha256"] or "").casefold() == current_digest.casefold():
                     continue
                 prequeue_needed.append(path)
             print(
@@ -12020,6 +12361,13 @@ def main() -> None:
                 f"已有批次或后续结果{len(mineru_files) - len(prequeue_needed)}｜"
                 f"本次需提交或重试{len(prequeue_needed)}"
             )
+            if files and not args.prequeue_only:
+                try:
+                    preflight(cfg, db)
+                except Exception as exc:
+                    raise SystemExit(
+                        f"处理前检查失败，尚未提交新的MinerU任务：{exc}"
+                    ) from exc
             prequeue_all_mineru(prequeue_needed, cfg, token_slots)
             if args.prequeue_only:
                 print(
@@ -12027,13 +12375,6 @@ def main() -> None:
                     "未消费结果、未调用本地模型、未删除源文件"
                 )
                 return
-            if files:
-                try:
-                    preflight(cfg, db)
-                except Exception as exc:
-                    raise SystemExit(
-                        f"处理前检查失败，源文件未改动：{exc}"
-                    ) from exc
             print(
                 f"MinerU并行通道：{len(token_slots)}｜"
                 f"{' + '.join(token_slots)}"
