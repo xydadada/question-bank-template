@@ -5721,6 +5721,62 @@ def drain_index_cleanup_queue(
     return result
 
 
+def group_local_markdown_paths(
+    db: sqlite3.Connection,
+    group: sqlite3.Row | dict,
+) -> set[Path]:
+    """Return every local Markdown path currently attached to one group."""
+    paths: set[Path] = set()
+    for field in ("markdown_path", "raw_path"):
+        value = group[field]
+        if value:
+            paths.add(Path(str(value)))
+    for row in db.execute(
+        """SELECT DISTINCT f.markdown_path
+        FROM group_files gf
+        LEFT JOIN files f ON f.sha256=gf.sha256
+        WHERE gf.group_id=? AND coalesce(f.markdown_path,'')!=''""",
+        (str(group["group_id"]),),
+    ).fetchall():
+        paths.add(Path(str(row["markdown_path"])))
+    return paths
+
+
+def expand_group_ids_by_sha(
+    db: sqlite3.Connection,
+    group_ids: set[str],
+) -> set[str]:
+    """Return the transitive group closure for immutable source digests."""
+    expanded = {group_id for group_id in group_ids if group_id}
+    while expanded:
+        selected = sorted(expanded)
+        placeholders = ",".join("?" for _ in selected)
+        digests = {
+            str(row["sha256"])
+            for row in db.execute(
+                f"""SELECT DISTINCT sha256 FROM group_files
+                WHERE group_id IN ({placeholders})""",
+                selected,
+            ).fetchall()
+        }
+        if not digests:
+            break
+        digest_values = sorted(digests)
+        digest_placeholders = ",".join("?" for _ in digest_values)
+        related = {
+            str(row["group_id"])
+            for row in db.execute(
+                f"""SELECT DISTINCT group_id FROM group_files
+                WHERE sha256 IN ({digest_placeholders})""",
+                digest_values,
+            ).fetchall()
+        }
+        if related <= expanded:
+            break
+        expanded |= related
+    return expanded
+
+
 def detect_manual_deletions(
     cfg: dict,
     db: sqlite3.Connection,
@@ -5891,12 +5947,47 @@ def detect_manual_deletions(
             "group_updated_at": str(members[0]["updated_at"] or 0),
         }
 
+    affected_group_ids = expand_group_ids_by_sha(db, {
+        *(item["group_id"] for item in markdown_missing),
+        *source_missing_by_group,
+    })
+    markdown_snapshots: list[dict[str, str]] = []
+    group_snapshots: list[dict[str, str]] = []
+    snapshot_roots = (markdown_root, cfg["folders"]["work"].resolve())
+    for group_id in sorted(affected_group_ids):
+        group = db.execute(
+            "SELECT * FROM groups WHERE group_id=?", (group_id,)
+        ).fetchone()
+        if group is None:
+            continue
+        group_snapshots.append(
+            {
+                "group_id": group_id,
+                "updated_at": str(group["updated_at"] or 0),
+            }
+        )
+        for candidate in sorted(
+            group_local_markdown_paths(db, group),
+            key=lambda path: str(path).casefold(),
+        ):
+            if not candidate.is_file() or not under(candidate, snapshot_roots):
+                continue
+            markdown_snapshots.append(
+                {
+                    "group_id": group_id,
+                    "path": str(candidate.resolve()),
+                    "sha256": stable_sha256(candidate),
+                }
+            )
+
     payload = {
         "generated_at": datetime.now().astimezone().isoformat(),
         "detection": "live_state_db_and_filesystem",
         "grace_seconds": max(0, grace_seconds),
         "newly_missing_markdown": markdown_missing,
         "newly_missing_sources": list(source_missing_by_group.values()),
+        "related_group_snapshots": group_snapshots,
+        "existing_markdown_snapshots": markdown_snapshots,
     }
     output_path = output_path.resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5908,12 +5999,7 @@ def detect_manual_deletions(
         "output_path": str(output_path),
         "missing_markdown": len(markdown_missing),
         "missing_sources": len(source_missing_by_group),
-        "affected_groups": len(
-            {
-                *(item["group_id"] for item in markdown_missing),
-                *source_missing_by_group,
-            }
-        ),
+        "affected_groups": len(affected_group_ids),
     }
 
 
@@ -5964,36 +6050,11 @@ def sync_manual_deletions(
         for item in payload.get("newly_missing_sources", [])
         if str(item.get("group_id") or "")
     }
-    selected_set = markdown_selected | source_selected
     # One immutable source may have been attached to an old group and a later
     # recovered group.  The user's deletion rule applies to the whole material,
     # so expand the selection across every group sharing that exact SHA-256.
-    while selected_set:
-        selected_ids = sorted(selected_set)
-        selected_placeholders = ",".join("?" for _ in selected_ids)
-        related_shas = {
-            str(row["sha256"])
-            for row in db.execute(
-                f"""SELECT DISTINCT sha256 FROM group_files
-                WHERE group_id IN ({selected_placeholders})""",
-                selected_ids,
-            ).fetchall()
-        }
-        if not related_shas:
-            break
-        sha_values = sorted(related_shas)
-        sha_placeholders = ",".join("?" for _ in sha_values)
-        expanded = {
-            str(row["group_id"])
-            for row in db.execute(
-                f"""SELECT DISTINCT group_id FROM group_files
-                WHERE sha256 IN ({sha_placeholders})""",
-                sha_values,
-            ).fetchall()
-        }
-        if expanded <= selected_set:
-            break
-        selected_set |= expanded
+    direct_selected = markdown_selected | source_selected
+    selected_set = expand_group_ids_by_sha(db, direct_selected)
     group_ids = sorted(selected_set)
     if not group_ids:
         raise RuntimeError("手动删除差异文件中没有资料组")
@@ -6013,14 +6074,24 @@ def sync_manual_deletions(
             + "、".join(missing[:10])
         )
 
-    selected_shas = {
-        str(row["sha256"])
-        for row in db.execute(
-            f"""SELECT DISTINCT sha256 FROM group_files
-            WHERE group_id IN ({placeholders})""",
-            group_ids,
-        ).fetchall()
-    }
+    if payload.get("detection") == "live_state_db_and_filesystem":
+        group_snapshots = {
+            str(item.get("group_id") or ""): int(item.get("updated_at") or 0)
+            for item in payload.get("related_group_snapshots", [])
+            if str(item.get("group_id") or "")
+        }
+        for group in groups:
+            group_id = str(group["group_id"])
+            expected_updated_at = group_snapshots.get(group_id, 0)
+            if expected_updated_at <= 0:
+                raise RuntimeError(
+                    f"手动删除差异缺少关联资料组快照: {group_id}"
+                )
+            if int(group["updated_at"] or 0) != expected_updated_at:
+                raise RuntimeError(
+                    f"关联资料组在检测后已变化，拒绝级联删除: {group_id}"
+                )
+
     # The transitive expansion above includes every exact-content membership.
     # Nothing with the same SHA is retained under a second stale group name.
     shared_shas: set[str] = set()
@@ -6038,6 +6109,90 @@ def sync_manual_deletions(
             resolved != root and root in resolved.parents
             for root in allowed_roots
         )
+
+    payload_snapshots: dict[tuple[str, str], str] = {}
+    for item in payload.get("existing_markdown_snapshots", []):
+        group_id = str(item.get("group_id") or "")
+        raw_path = str(item.get("path") or "")
+        digest = str(item.get("sha256") or "").casefold()
+        if group_id and raw_path and re.fullmatch(r"[0-9a-f]{64}", digest):
+            payload_snapshots[(group_id, str(Path(raw_path).resolve()))] = digest
+
+    audit_snapshots: dict[tuple[str, str], str] = {}
+    audit_selections: dict[str, dict] = {}
+    if group_ids:
+        for row in db.execute(
+            f"""SELECT group_id,selection_json FROM manual_deletion_audit
+            WHERE group_id IN ({placeholders})""",
+            group_ids,
+        ).fetchall():
+            try:
+                saved = json.loads(str(row["selection_json"] or "{}"))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(saved, dict):
+                continue
+            audit_selections[str(row["group_id"])] = saved
+            for item in saved.get("markdown_snapshots", []):
+                raw_path = str(item.get("path") or "")
+                digest = str(item.get("sha256") or "").casefold()
+                if raw_path and re.fullmatch(r"[0-9a-f]{64}", digest):
+                    audit_snapshots[
+                        (str(row["group_id"]), str(Path(raw_path).resolve()))
+                    ] = digest
+
+    detection_kind = str(payload.get("detection") or "")
+    group_markdown_manifests: dict[str, dict[str, str]] = {}
+    group_expected_markdown_manifests: dict[str, dict[str, str]] = {}
+    manifest_errors: dict[str, list[str]] = {}
+    for group in groups:
+        group_id = str(group["group_id"])
+        manifest: dict[str, str] = {}
+        expected_manifest: dict[str, str] = {}
+        errors_for_group: list[str] = []
+        for candidate in sorted(
+            group_local_markdown_paths(db, group),
+            key=lambda path: str(path).casefold(),
+        ):
+            if not candidate.exists():
+                continue
+            if not candidate.is_file() or not allowed_file(candidate):
+                errors_for_group.append(
+                    f"Markdown路径不在允许目录或不是普通文件: {candidate}"
+                )
+                continue
+            resolved = str(candidate.resolve())
+            expected = payload_snapshots.get((group_id, resolved)) or audit_snapshots.get(
+                (group_id, resolved)
+            )
+            strict_existing_snapshot = detection_kind in {
+                "live_state_db_and_filesystem",
+                "pending_manual_deletion_resume",
+            }
+            if not expected and strict_existing_snapshot:
+                errors_for_group.append(
+                    f"缺少删除检测时的Markdown摘要快照，拒绝删除: {candidate}"
+                )
+                continue
+            if expected:
+                expected_manifest[resolved] = expected
+            try:
+                current_digest = stable_sha256(candidate)
+            except (OSError, RuntimeError) as exc:
+                errors_for_group.append(
+                    f"Markdown摘要无法确认 {candidate}: {exc}"
+                )
+                continue
+            if expected and current_digest != expected:
+                errors_for_group.append(
+                    f"Markdown在检测后已被替换，保留新内容: {candidate}"
+                )
+                continue
+            manifest[resolved] = expected or current_digest
+            expected_manifest.setdefault(resolved, current_digest)
+        group_markdown_manifests[group_id] = manifest
+        group_expected_markdown_manifests[group_id] = expected_manifest
+        manifest_errors[group_id] = errors_for_group
 
     local_source_paths: set[Path] = set()
     local_markdown_paths: set[Path] = set()
@@ -6098,17 +6253,37 @@ def sync_manual_deletions(
     now = int(time.time())
     for group in groups:
         group_id = str(group["group_id"])
-        selection = {
-            "markdown_deleted_by_user": group_id in markdown_selected,
-            "source_deleted_by_user": group_id in source_selected,
-            "difference_file": str(selection_path),
-        }
+        previous_selection = audit_selections.get(group_id, {})
+        selection = dict(previous_selection)
+        if detection_kind != "pending_manual_deletion_resume":
+            selection["markdown_deleted_by_user"] = bool(
+                previous_selection.get("markdown_deleted_by_user")
+            ) or group_id in markdown_selected
+            selection["source_deleted_by_user"] = bool(
+                previous_selection.get("source_deleted_by_user")
+            ) or group_id in source_selected
+        selection.setdefault("difference_file", str(selection_path))
+        if (
+            detection_kind == "historical_manual_deletion_sha_closure"
+            or (
+                detection_kind == "live_state_db_and_filesystem"
+                and group_id not in direct_selected
+            )
+        ):
+            selection["exact_sha_duplicate"] = True
+        selection["markdown_snapshots"] = [
+                {"path": path, "sha256": digest}
+                for path, digest in sorted(
+                    group_expected_markdown_manifests[group_id].items(),
+                    key=lambda item: str(item[0]).casefold(),
+                )
+            ]
         db.execute(
             """INSERT INTO manual_deletion_audit(
                 group_id,requested_at,state,selection_json,error
             ) VALUES(?,?,?,?,?)
             ON CONFLICT(group_id) DO UPDATE SET
-                requested_at=excluded.requested_at,
+                requested_at=manual_deletion_audit.requested_at,
                 state=excluded.state,
                 selection_json=excluded.selection_json,
                 error=''""",
@@ -6151,12 +6326,12 @@ def sync_manual_deletions(
     wc = cfg["weknora"]
     for index, group in enumerate(groups, 1):
         group_id = str(group["group_id"])
-        errors: list[str] = []
+        errors: list[str] = list(manifest_errors.get(group_id, []))
         group_sources_deleted = 0
         group_markdown_deleted = 0
         group_indexes_deleted = 0
 
-        doc_fields = (
+        doc_fields = () if errors else (
             ("parent_doc_id", wc["parent_knowledge_base"]),
             ("child_doc_id", wc["child_knowledge_base"]),
             ("raw_doc_id", wc.get("raw_knowledge_base") or ""),
@@ -6214,10 +6389,21 @@ def sync_manual_deletions(
             if digest:
                 paths_to_delete[(candidate, kind)].add(digest)
 
+        markdown_manifest = group_markdown_manifests.get(group_id, {})
         if group["markdown_path"]:
-            add_delete_path(Path(group["markdown_path"]), "markdown")
+            candidate = Path(group["markdown_path"])
+            add_delete_path(
+                candidate,
+                "markdown",
+                markdown_manifest.get(str(candidate.resolve()), ""),
+            )
         if group["raw_path"]:
-            add_delete_path(Path(group["raw_path"]), "markdown")
+            candidate = Path(group["raw_path"])
+            add_delete_path(
+                candidate,
+                "markdown",
+                markdown_manifest.get(str(candidate.resolve()), ""),
+            )
         for member in members:
             digest = str(member["sha256"])
             if digest not in shared_shas:
@@ -6228,7 +6414,12 @@ def sync_manual_deletions(
                         Path(member["canonical_source"]), "source", digest
                     )
             if member["file_markdown"]:
-                add_delete_path(Path(member["file_markdown"]), "markdown")
+                candidate = Path(member["file_markdown"])
+                add_delete_path(
+                    candidate,
+                    "markdown",
+                    markdown_manifest.get(str(candidate.resolve()), ""),
+                )
         # Do not destroy the recoverable local copy while a remote index still
         # failed to delete.  The pending audit can then retry idempotently.
         if errors:
@@ -6241,19 +6432,21 @@ def sync_manual_deletions(
             if not candidate.is_file() or not allowed_file(candidate):
                 errors.append(f"拒绝删除允许目录外路径: {candidate}")
                 continue
-            if kind == "source":
+            if kind in {"source", "markdown"}:
                 if len(expected_digests) != 1:
-                    errors.append(f"源文件存在冲突摘要，拒绝删除: {candidate}")
+                    errors.append(
+                        f"{kind}文件缺少唯一摘要，拒绝删除: {candidate}"
+                    )
                     continue
                 try:
                     current_digest = stable_sha256(candidate)
                 except (OSError, RuntimeError) as exc:
-                    errors.append(f"源文件删除前摘要无法确认 {candidate}: {exc}")
+                    errors.append(f"{kind}文件删除前摘要无法确认 {candidate}: {exc}")
                     continue
                 expected_digest = next(iter(expected_digests))
                 if current_digest != expected_digest:
                     errors.append(
-                        f"源文件在检测后已被替换，保留新内容: {candidate}"
+                        f"{kind}文件在检测后已被替换，保留新内容: {candidate}"
                     )
                     continue
             try:

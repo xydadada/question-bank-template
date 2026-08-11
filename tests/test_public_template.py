@@ -1,5 +1,6 @@
 import ast
 import io
+import json
 import os
 import re
 import sqlite3
@@ -1309,15 +1310,29 @@ class PublicTemplateTests(unittest.TestCase):
     def test_stack_start_is_serialized_and_does_not_adopt_unrelated_wsl(self) -> None:
         start = (ROOT / "scripts" / "start.ps1").read_text("utf-8")
         stop = (ROOT / "scripts" / "stop.ps1").read_text("utf-8")
-        self.assertIn("QuestionBank-$MutexDigest-StackStart", start)
-        self.assertIn("$SharedWslPath", start)
-        self.assertIn("if (-not (Test-Path $PidFile)) { return $null }", start)
+        self.assertIn("QuestionBank-$MutexDigest-StackLifecycle", start)
+        self.assertIn("QuestionBank-$MutexDigest-StackLifecycle", stop)
+        self.assertIn("QUESTION_BANK_KEEPALIVE=$KeepAliveToken", start)
+        self.assertIn("$WrongDistroKeepAlive", start)
+        self.assertIn("$Managed.Count -gt 1", start)
+        self.assertNotIn("if (-not (Test-Path $PidFile)) { return }", stop)
         self.assertIn("[regex]::Escape($IngestScript)", start)
         self.assertIn("[regex]::Escape($IngestScript)", stop)
+        self.assertIn("QUESTION_BANK_KEEPALIVE=", stop)
         self.assertIn("function Stop-ProcessTree", start)
         self.assertIn("function Stop-ProcessTree", stop)
         self.assertIn("Stop-ProcessTree ([int]$Row.ProcessId)", start)
-        self.assertIn("Stop-ProcessTree $SavedPid", stop)
+        self.assertIn("Stop-ProcessTree ([int]$Row.ProcessId)", stop)
+
+    def test_mcp_startup_failure_stops_the_proxy_process_tree(self) -> None:
+        start = (ROOT / "mcp-public" / "start.ps1").read_text("utf-8")
+        stop = (ROOT / "mcp-public" / "stop.ps1").read_text("utf-8")
+        self.assertIn("function Stop-ManagedProxyTree", start)
+        self.assertGreaterEqual(start.count("Stop-ManagedProxyTree"), 4)
+        self.assertIn("QuestionBank-$MutexDigest-McpLifecycle", start)
+        self.assertIn("QuestionBank-$MutexDigest-McpLifecycle", stop)
+        self.assertIn("process tree still has running PIDs", start)
+        self.assertIn("process tree still has running PIDs", stop)
 
     def test_windows_powershell_reads_rewritten_utf8_files_explicitly(self) -> None:
         """Windows PowerShell 5.1 must not decode UTF-8 files as ANSI."""
@@ -1399,6 +1414,281 @@ class PublicTemplateTests(unittest.TestCase):
                         cfg, database, selection, dry_run=False
                     )
             self.assertEqual(source.read_bytes(), b"new replacement bytes")
+            database.close()
+
+    def test_manual_deletion_preserves_replaced_markdown_and_remote_indexes(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            folders = {
+                name: root / name
+                for name in ("inbox", "failed", "markdown", "work")
+            }
+            for folder in folders.values():
+                folder.mkdir(parents=True)
+            source = folders["inbox"] / "source.pdf"
+            parent = folders["markdown"] / "parent.md"
+            raw = folders["markdown"] / "raw.md"
+            source.write_bytes(b"source bytes")
+            parent.write_text("# parent", encoding="utf-8")
+            raw.write_text("# original raw", encoding="utf-8")
+            digest = ingest.sha256(source)
+            with mock.patch.object(ingest, "ROOT", root):
+                database = ingest.db_open()
+            old_time = int(time.time()) - 120
+            database.execute(
+                """INSERT INTO files(
+                    sha256,source_path,state,markdown_path,error,updated_at,metrics_json
+                ) VALUES(?,?,?,?,?,?,?)""",
+                (digest, str(source), "completed", str(raw), "", old_time, "{}"),
+            )
+            database.execute(
+                """INSERT INTO groups(
+                    group_id,group_name,state,markdown_path,raw_path,
+                    parent_doc_id,child_doc_id,raw_doc_id,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    "group-1",
+                    "group-1",
+                    "completed",
+                    str(parent),
+                    str(raw),
+                    "parent-doc",
+                    "child-doc",
+                    "raw-doc",
+                    old_time,
+                ),
+            )
+            database.execute(
+                "INSERT INTO group_files(group_id,sha256,source_path) VALUES(?,?,?)",
+                ("group-1", digest, str(source)),
+            )
+            database.commit()
+            parent.unlink()
+            selection = folders["work"] / "selection.json"
+            cfg = {
+                "folders": folders,
+                "cleanup": {"permanently_delete_source_after_search": False},
+                "weknora": {
+                    "parent_knowledge_base": "parent-kb",
+                    "child_knowledge_base": "child-kb",
+                    "raw_knowledge_base": "raw-kb",
+                },
+            }
+            detected = ingest.detect_manual_deletions(
+                cfg, database, selection, grace_seconds=0
+            )
+            self.assertEqual(detected["affected_groups"], 1)
+            raw.write_text("# unrelated replacement", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {"QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC": "I_UNDERSTAND"},
+            ), mock.patch.object(ingest, "weknora_delete") as remote_delete:
+                result = ingest.sync_manual_deletions(
+                    cfg, database, selection, dry_run=False
+                )
+            self.assertEqual(result["groups_pending"], 1)
+            self.assertEqual(raw.read_text("utf-8"), "# unrelated replacement")
+            self.assertTrue(source.is_file())
+            remote_delete.assert_not_called()
+            group = database.execute(
+                "SELECT state,error FROM groups WHERE group_id='group-1'"
+            ).fetchone()
+            self.assertEqual(group["state"], "user_delete_pending")
+            self.assertIn("Markdown在检测后已被替换", group["error"])
+            requested_at = database.execute(
+                "SELECT requested_at FROM manual_deletion_audit WHERE group_id='group-1'"
+            ).fetchone()["requested_at"]
+            raw.write_text("# original raw", encoding="utf-8")
+            selection.write_text(
+                json.dumps(
+                    {
+                        "detection": "pending_manual_deletion_resume",
+                        "newly_missing_markdown": [],
+                        "newly_missing_sources": [{"group_id": "group-1"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC": "I_UNDERSTAND"},
+            ), mock.patch.object(ingest, "weknora_delete") as resumed_delete:
+                resumed = ingest.sync_manual_deletions(
+                    cfg, database, selection, dry_run=False
+                )
+            self.assertEqual(resumed["groups_completed"], 1)
+            self.assertEqual(resumed_delete.call_count, 3)
+            self.assertFalse(source.exists())
+            self.assertFalse(raw.exists())
+            audit = database.execute(
+                "SELECT requested_at,state FROM manual_deletion_audit "
+                "WHERE group_id='group-1'"
+            ).fetchone()
+            self.assertEqual(audit["requested_at"], requested_at)
+            self.assertEqual(audit["state"], "user_deleted")
+            database.close()
+
+    def test_manual_deletion_happy_path_removes_all_bound_layers(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            folders = {
+                name: root / name
+                for name in ("inbox", "failed", "markdown", "work")
+            }
+            for folder in folders.values():
+                folder.mkdir(parents=True)
+            source = folders["inbox"] / "source.pdf"
+            parent = folders["markdown"] / "parent.md"
+            raw = folders["markdown"] / "raw.md"
+            source.write_bytes(b"source bytes")
+            parent.write_text("# parent", encoding="utf-8")
+            raw.write_text("# raw", encoding="utf-8")
+            digest = ingest.sha256(source)
+            with mock.patch.object(ingest, "ROOT", root):
+                database = ingest.db_open()
+            old_time = int(time.time()) - 120
+            database.execute(
+                """INSERT INTO files(
+                    sha256,source_path,state,markdown_path,error,updated_at,metrics_json
+                ) VALUES(?,?,?,?,?,?,?)""",
+                (digest, str(source), "completed", str(raw), "", old_time, "{}"),
+            )
+            database.execute(
+                """INSERT INTO groups(
+                    group_id,group_name,state,markdown_path,raw_path,
+                    parent_doc_id,child_doc_id,raw_doc_id,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    "group-1", "group-1", "completed", str(parent), str(raw),
+                    "parent-doc", "child-doc", "raw-doc", old_time,
+                ),
+            )
+            database.execute(
+                "INSERT INTO group_files(group_id,sha256,source_path) VALUES(?,?,?)",
+                ("group-1", digest, str(source)),
+            )
+            database.commit()
+            parent.unlink()
+            selection = folders["work"] / "selection.json"
+            cfg = {
+                "folders": folders,
+                "cleanup": {"permanently_delete_source_after_search": False},
+                "weknora": {
+                    "parent_knowledge_base": "parent-kb",
+                    "child_knowledge_base": "child-kb",
+                    "raw_knowledge_base": "raw-kb",
+                },
+            }
+            ingest.detect_manual_deletions(cfg, database, selection, grace_seconds=0)
+            with mock.patch.dict(
+                os.environ,
+                {"QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC": "I_UNDERSTAND"},
+            ), mock.patch.object(ingest, "weknora_delete") as remote_delete:
+                result = ingest.sync_manual_deletions(
+                    cfg, database, selection, dry_run=False
+                )
+            self.assertEqual(result["groups_completed"], 1)
+            self.assertEqual(remote_delete.call_count, 3)
+            self.assertFalse(source.exists())
+            self.assertFalse(raw.exists())
+            group = database.execute(
+                "SELECT state,parent_doc_id,child_doc_id,raw_doc_id FROM groups "
+                "WHERE group_id='group-1'"
+            ).fetchone()
+            self.assertEqual(group["state"], "user_deleted")
+            self.assertFalse(any(group[field] for field in (
+                "parent_doc_id", "child_doc_id", "raw_doc_id"
+            )))
+            database.close()
+
+    def test_manual_deletion_snapshots_every_same_digest_group(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            folders = {
+                name: root / name
+                for name in ("inbox", "failed", "markdown", "work")
+            }
+            for folder in folders.values():
+                folder.mkdir(parents=True)
+            source = folders["inbox"] / "shared.pdf"
+            source.write_bytes(b"shared source")
+            digest = ingest.sha256(source)
+            with mock.patch.object(ingest, "ROOT", root):
+                database = ingest.db_open()
+            old_time = int(time.time()) - 120
+            database.execute(
+                """INSERT INTO files(
+                    sha256,source_path,state,error,updated_at,metrics_json
+                ) VALUES(?,?,?,?,?,?)""",
+                (digest, str(source), "completed", "", old_time, "{}"),
+            )
+            paths = []
+            for index in (1, 2):
+                parent = folders["markdown"] / f"parent-{index}.md"
+                raw = folders["markdown"] / f"raw-{index}.md"
+                parent.write_text(f"# parent {index}", encoding="utf-8")
+                raw.write_text(f"# raw {index}", encoding="utf-8")
+                paths.extend((parent.resolve(), raw.resolve()))
+                database.execute(
+                    """INSERT INTO groups(
+                        group_id,group_name,state,markdown_path,raw_path,updated_at
+                    ) VALUES(?,?,?,?,?,?)""",
+                    (
+                        f"group-{index}", f"group-{index}", "completed",
+                        str(parent), str(raw), old_time,
+                    ),
+                )
+                database.execute(
+                    "INSERT INTO group_files(group_id,sha256,source_path) VALUES(?,?,?)",
+                    (f"group-{index}", digest, str(source)),
+                )
+            database.commit()
+            paths[0].unlink()
+            selection = folders["work"] / "selection.json"
+            cfg = {
+                "folders": folders,
+                "cleanup": {"permanently_delete_source_after_search": False},
+                "weknora": {
+                    "parent_knowledge_base": "parent-kb",
+                    "child_knowledge_base": "child-kb",
+                    "raw_knowledge_base": "raw-kb",
+                },
+            }
+            result = ingest.detect_manual_deletions(
+                cfg, database, selection, grace_seconds=0
+            )
+            payload = json.loads(selection.read_text("utf-8"))
+            self.assertEqual(result["affected_groups"], 2)
+            self.assertEqual(
+                {item["group_id"] for item in payload["related_group_snapshots"]},
+                {"group-1", "group-2"},
+            )
+            self.assertEqual(
+                {Path(item["path"]) for item in payload["existing_markdown_snapshots"]},
+                set(paths[1:]),
+            )
+            with mock.patch.dict(
+                os.environ,
+                {"QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC": "I_UNDERSTAND"},
+            ):
+                synced = ingest.sync_manual_deletions(
+                    cfg, database, selection, dry_run=False
+                )
+            self.assertEqual(synced["groups_completed"], 2)
+            audits = {
+                row["group_id"]: json.loads(row["selection_json"])
+                for row in database.execute(
+                    "SELECT group_id,selection_json FROM manual_deletion_audit"
+                ).fetchall()
+            }
+            self.assertFalse(audits["group-1"].get("exact_sha_duplicate", False))
+            self.assertTrue(audits["group-2"]["exact_sha_duplicate"])
             database.close()
 
 

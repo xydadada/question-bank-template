@@ -61,25 +61,54 @@ function Stop-ManagedProcess(
     [string]$CommandPattern,
     [string]$Name
 ) {
-    if (-not (Test-Path $PidFile)) { return }
-    try { $SavedPid = [int](Get-Content -Raw -LiteralPath $PidFile) } catch {
-        Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
-        return
+    $SavedPid = 0
+    if (Test-Path $PidFile) {
+        try { $SavedPid = [int](Get-Content -Raw -LiteralPath $PidFile) } catch {
+            $SavedPid = 0
+        }
     }
-    $Row = Get-CimInstance Win32_Process -Filter "ProcessId=$SavedPid" -ErrorAction SilentlyContinue
     $Expected = [IO.Path]::GetFullPath($ExpectedExecutable)
-    $MatchesExpected = $Row -and $Row.ExecutablePath -and
-        [IO.Path]::GetFullPath($Row.ExecutablePath).Equals($Expected, [StringComparison]::OrdinalIgnoreCase) -and
-        (!$CommandPattern -or $Row.CommandLine -match $CommandPattern)
-    if ($MatchesExpected) {
-        Stop-ProcessTree $SavedPid
-        Write-Host "$Name process tree stopped (root PID $SavedPid)."
-    } elseif ($Row) {
-        Write-Warning "Ignored stale $Name PID file; PID $SavedPid belongs to another process."
+    $Managed = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.ExecutablePath -and
+        [IO.Path]::GetFullPath($_.ExecutablePath).Equals($Expected, [StringComparison]::OrdinalIgnoreCase) -and
+        (!$CommandPattern -or $_.CommandLine -match $CommandPattern)
+    })
+    if ($SavedPid -and -not ($Managed | Where-Object { $_.ProcessId -eq $SavedPid })) {
+        $SavedRow = Get-CimInstance Win32_Process -Filter "ProcessId=$SavedPid" -ErrorAction SilentlyContinue
+        if ($SavedRow) {
+            Write-Warning "Ignored stale $Name PID file; PID $SavedPid belongs to another process."
+        }
+    }
+    foreach ($Row in $Managed) {
+        Stop-ProcessTree ([int]$Row.ProcessId)
+        Write-Host "$Name process tree stopped (root PID $($Row.ProcessId))."
+    }
+    $Remaining = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.ExecutablePath -and
+        [IO.Path]::GetFullPath($_.ExecutablePath).Equals($Expected, [StringComparison]::OrdinalIgnoreCase) -and
+        (!$CommandPattern -or $_.CommandLine -match $CommandPattern)
+    })
+    if ($Remaining.Count) {
+        throw "$Name still has managed processes after teardown: $(@($Remaining.ProcessId) -join ', ')"
     }
     Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
 }
 
+$MutexHasher = [Security.Cryptography.SHA256]::Create()
+try {
+    $MutexDigest = ([BitConverter]::ToString(
+        $MutexHasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($Root.ToLowerInvariant()))
+    )).Replace('-', '').Substring(0, 24)
+} finally { $MutexHasher.Dispose() }
+$LifecycleMutex = [Threading.Mutex]::new($false, "Local\QuestionBank-$MutexDigest-StackLifecycle")
+$LifecycleMutexOwned = $false
+try { $LifecycleMutexOwned = $LifecycleMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $LifecycleMutexOwned = $true }
+if (-not $LifecycleMutexOwned) {
+    $LifecycleMutex.Dispose()
+    throw "Another stack start or stop operation is already running for this template."
+}
+
+try {
 $Failures = [Collections.Generic.List[string]]::new()
 try { & (Join-Path $Root "mcp-public\stop.ps1") } catch { $Failures.Add($_.Exception.Message) }
 
@@ -96,8 +125,8 @@ if ($StopWeKnora) {
         & $WslExe -d $WslDistro --cd $WeKnora -- docker compose --profile "*" stop
         if ($LASTEXITCODE -ne 0) { $Failures.Add("WeKnora Docker stop failed.") }
     }
-    $DistroPattern = [regex]::Escape($WslDistro)
-    $KeepAlivePattern = '(?i)-d\s+"?' + $DistroPattern + '"?.*sleep\s+infinity'
+    $KeepAliveToken = "question-bank-$MutexDigest"
+    $KeepAlivePattern = '(?i)QUESTION_BANK_KEEPALIVE=' + [regex]::Escape($KeepAliveToken) + '.*sleep\s+infinity'
     try {
         Stop-ManagedProcess (Join-Path $Runtime "wsl-keepalive.pid") $WslExe $KeepAlivePattern "WSL keepalive"
     } catch { $Failures.Add($_.Exception.Message) }
@@ -109,3 +138,7 @@ if ($Failures.Count) {
     throw "Stop completed with $($Failures.Count) failure(s); every teardown step was attempted."
 }
 Write-Host "Local workers stopped. WeKnoraStopped=$StopWeKnora"
+} finally {
+    if ($LifecycleMutexOwned) { $LifecycleMutex.ReleaseMutex() }
+    $LifecycleMutex.Dispose()
+}

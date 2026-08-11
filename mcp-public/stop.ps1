@@ -23,18 +23,38 @@ function Stop-ProcessTree([int]$RootProcessId, [string]$Name) {
             $Pending.Push([int]$Child.ProcessId)
         }
     }
+    # Stop the supervisor first so it cannot spawn a replacement child while
+    # the already captured descendants are being terminated.
+    Stop-Process -Id $RootProcessId -Force -ErrorAction SilentlyContinue
     for ($Index = $Order.Count - 1; $Index -ge 0; $Index--) {
         Stop-Process -Id $Order[$Index] -ErrorAction SilentlyContinue
     }
     $Deadline = [DateTime]::UtcNow.AddSeconds(15)
-    while ((Get-Process -Id $RootProcessId -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $Deadline) {
+    do {
+        $RemainingIds = @($Order | Where-Object {
+            Get-Process -Id $_ -ErrorAction SilentlyContinue
+        })
+        if (-not $RemainingIds.Count) { return }
         Start-Sleep -Milliseconds 250
-    }
-    if (Get-Process -Id $RootProcessId -ErrorAction SilentlyContinue) {
-        throw "$Name process tree did not exit within 15 seconds."
-    }
+    } while ([DateTime]::UtcNow -lt $Deadline)
+    throw "$Name process tree still has running PIDs: $($RemainingIds -join ', ')"
 }
 
+$MutexHasher = [Security.Cryptography.SHA256]::Create()
+try {
+    $MutexDigest = ([BitConverter]::ToString(
+        $MutexHasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($Root.ToLowerInvariant()))
+    )).Replace('-', '').Substring(0, 24)
+} finally { $MutexHasher.Dispose() }
+$LifecycleMutex = [Threading.Mutex]::new($false, "Local\QuestionBank-$MutexDigest-McpLifecycle")
+$LifecycleMutexOwned = $false
+try { $LifecycleMutexOwned = $LifecycleMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $LifecycleMutexOwned = $true }
+if (-not $LifecycleMutexOwned) {
+    $LifecycleMutex.Dispose()
+    throw "Another MCP start or stop operation is already running for this template."
+}
+
+try {
 # Tear down the public edge first. A local proxy failure must never leave the
 # Cloudflare route active merely because teardown stopped at the first error.
 foreach ($Name in "cloudflared", "proxy") {
@@ -83,3 +103,7 @@ if ($Failures.Count) {
     throw "MCP teardown completed with $($Failures.Count) failure(s). Public tunnel teardown was attempted first."
 }
 Write-Host "MCP proxy and tunnel stop check complete."
+} finally {
+    if ($LifecycleMutexOwned) { $LifecycleMutex.ReleaseMutex() }
+    $LifecycleMutex.Dispose()
+}

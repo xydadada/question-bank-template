@@ -22,7 +22,7 @@ try {
         $MutexHasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($Root.ToLowerInvariant()))
     )).Replace('-', '').Substring(0, 24)
 } finally { $MutexHasher.Dispose() }
-$StartMutex = [Threading.Mutex]::new($false, "Local\QuestionBank-$MutexDigest-McpProxyStart")
+$StartMutex = [Threading.Mutex]::new($false, "Local\QuestionBank-$MutexDigest-McpLifecycle")
 $StartMutexOwned = $false
 try { $StartMutexOwned = $StartMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $StartMutexOwned = $true }
 if (-not $StartMutexOwned) {
@@ -64,6 +64,36 @@ function Invoke-WeKnoraJson([string[]]$Arguments, [string]$FailureMessage) {
     try { return $Raw | ConvertFrom-Json } catch {
         throw "$FailureMessage The official CLI returned malformed JSON."
     }
+}
+
+function Stop-ManagedProxyTree([int]$RootProcessId) {
+    $Rows = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $Pending = [Collections.Generic.Stack[int]]::new()
+    $Order = [Collections.Generic.List[int]]::new()
+    $Pending.Push($RootProcessId)
+    while ($Pending.Count) {
+        $Current = $Pending.Pop()
+        if ($Order.Contains($Current)) { continue }
+        $Order.Add($Current)
+        foreach ($Child in $Rows | Where-Object { $_.ParentProcessId -eq $Current }) {
+            $Pending.Push([int]$Child.ProcessId)
+        }
+    }
+    # Stop the supervisor first so it cannot spawn a replacement child while
+    # the already captured descendants are being terminated.
+    Stop-Process -Id $RootProcessId -Force -ErrorAction SilentlyContinue
+    for ($Index = $Order.Count - 1; $Index -ge 0; $Index--) {
+        Stop-Process -Id $Order[$Index] -Force -ErrorAction SilentlyContinue
+    }
+    $Deadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        $RemainingIds = @($Order | Where-Object {
+            Get-Process -Id $_ -ErrorAction SilentlyContinue
+        })
+        if (-not $RemainingIds.Count) { return }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $Deadline)
+    throw "MCP proxy process tree still has running PIDs: $($RemainingIds -join ', ')"
 }
 
 # A listening proxy is not proof that the dedicated read-only credential can
@@ -174,10 +204,7 @@ if (Test-Path $PidFile) {
         if (-not $CommandMatches -or $StoredFingerprint -ne $ExpectedFingerprint) {
             throw "A proxy from this template is already running with different URL, profile, or password settings. Run mcp-public/stop.ps1, then start again."
         }
-        Stop-Process -Id $ExistingPid
-        $StopDeadline = [DateTime]::UtcNow.AddSeconds(15)
-        while ((Get-Process -Id $ExistingPid -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $StopDeadline) { Start-Sleep -Milliseconds 250 }
-        if (Get-Process -Id $ExistingPid -ErrorAction SilentlyContinue) { throw "Unhealthy MCP proxy could not be stopped safely." }
+        Stop-ManagedProxyTree $ExistingPid
     }
     Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $FingerprintFile -Force -ErrorAction SilentlyContinue
@@ -207,6 +234,7 @@ try {
 $Deadline = [DateTime]::UtcNow.AddSeconds(30)
 do {
     if ($Process.HasExited) {
+        Stop-ManagedProxyTree $Process.Id
         Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $FingerprintFile -Force -ErrorAction SilentlyContinue
         throw "mcp-auth-proxy exited. See mcp-public/logs/proxy.stderr.log."
@@ -222,9 +250,7 @@ do {
     Start-Sleep -Seconds 1
 } while ([DateTime]::UtcNow -lt $Deadline)
 if (-not $Process.HasExited) {
-    Stop-Process -Id $Process.Id -ErrorAction SilentlyContinue
-    $StopDeadline = [DateTime]::UtcNow.AddSeconds(15)
-    while ((Get-Process -Id $Process.Id -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $StopDeadline) { Start-Sleep -Milliseconds 250 }
+    Stop-ManagedProxyTree $Process.Id
 }
 if (Get-Process -Id $Process.Id -ErrorAction SilentlyContinue) {
     throw "mcp-auth-proxy stayed alive but unhealthy; PID file was retained for safe manual teardown."
