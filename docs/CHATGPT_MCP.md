@@ -71,19 +71,23 @@ powershell -File .\mcp-public\status.ps1
 
 启动脚本不会只看代理端口。公开 Tunnel 之前，它会用专用的 `mcp-readonly`
 Profile 重新执行 CLI doctor、确认父块、子块和原文三个已配置知识库都对该 Key
-可见，并在父块库完成一次限制为1条结果的真实混合检索。凭据失效、任一层权限
+可见，并在父块、子块和原文三层分别完成一次限制为1条结果的真实混合检索。
+凭据失效、任一层权限
 丢失或 Embedding 链路不可用时启动会直接失败，不会把 `/healthz` 正常误报为
 “ChatGPT 已可检索”。
 
 确认公网 `https://mcp.your-domain.example/healthz` 可达后，在实际使用的 ChatGPT
-Business/Enterprise Workspace 中创建自定义应用：
+Workspace 中连接 MCP：
 
-- 服务器 URL：`https://mcp.your-domain.example/mcp`
-- 身份验证：OAuth
-- 完成 OAuth 登录并启用实时访问或索引搜索
-- 审查工具列表，确认没有 create/delete/update/upload 等知识库写工具
-- 严格检索模式下，由 Workspace 管理员禁用 `chat` 和 `session_ask`
-- 先保存为草稿，真实检索成功后再按 Workspace 范围发布
+1. 在 ChatGPT 设置的 **Security and login** 中启用 Developer mode；该开关是否可见取决于账号和 Workspace 策略。
+2. 打开 **ChatGPT Plugins** 页面，选择加号，填写名称和描述。
+3. 服务器 URL 填写 `https://mcp.your-domain.example/mcp`，身份验证选择 OAuth，然后完成授权。
+4. 审查扫描到的工具和元数据，确认没有 create/delete/update/upload 等知识库写工具。
+5. 严格检索模式下，由 Workspace 管理员禁用 `chat` 和 `session_ask`。
+6. 先在新对话中从工具菜单加入该连接并执行真实检索；如 Workspace 提供草稿/发布控制，再由管理员发布给需要的成员。
+
+界面可能随产品更新；以 [OpenAI 官方的连接与测试步骤](https://developers.openai.com/plugins/deploy/connect-chatgpt)
+为准。
 
 账号邮箱相同不代表 Workspace 配置共享。应用必须安装到实际使用它的 Workspace。
 

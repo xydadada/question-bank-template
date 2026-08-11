@@ -87,6 +87,7 @@ PRINT_LOCK = threading.Lock()
 MAX_MINERU_RESULT_ZIP_BYTES = 2 * 1024**3
 MAX_MINERU_RESULT_FILES = 100_000
 MAX_MINERU_RESULT_EXPANDED_BYTES = 20 * 1024**3
+MIN_MINERU_RESULT_FREE_BYTES = 512 * 1024**2
 MAX_ARCHIVE_LIST_BYTES = 64 * 1024**2
 PROVIDER_SECRET_FIELD = re.compile(
     r"(?:url|uri|token|api.?key|authorization|credential|signature|secret)",
@@ -95,6 +96,9 @@ PROVIDER_SECRET_FIELD = re.compile(
 PROVIDER_INLINE_SECRET = re.compile(
     r"(?i)\b(?:token|api[_-]?key|authorization|credential|signature|secret)"
     r"\s*[:=]\s*[^\s,;\"'<>]+"
+)
+PROVIDER_BEARER_SECRET = re.compile(
+    r"(?i)\b(?:authorization\s*[:=]\s*)?bearer\s+[^\s,;\"'<>]+"
 )
 
 
@@ -128,7 +132,10 @@ def safe_provider_diagnostic(value: object) -> str:
                 "<redacted-url>",
                 item,
             )
-            return PROVIDER_INLINE_SECRET.sub("<redacted-secret>", without_urls)
+            without_bearer = PROVIDER_BEARER_SECRET.sub(
+                "<redacted-secret>", without_urls
+            )
+            return PROVIDER_INLINE_SECRET.sub("<redacted-secret>", without_bearer)
         if isinstance(item, (int, float, bool)) or item is None:
             return item
         return f"<{type(item).__name__}>"
@@ -882,6 +889,24 @@ def require_manual_deletion_sync_confirmation() -> None:
         "但尚未独立确认。请仅在理解该规则后，在本机.env中设置"
         "QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC=I_UNDERSTAND。"
     )
+
+
+def guarded_unlink(
+    path: Path,
+    action: str,
+    expected_digest: str | None = None,
+) -> str:
+    """Delete one explicitly selected ordinary file behind the global gate."""
+    require_permanent_delete_confirmation(action)
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"拒绝永久删除非普通文件: {path}")
+    current_digest = stable_sha256(path)
+    if expected_digest and current_digest != expected_digest:
+        raise RuntimeError(f"文件摘要已变化，拒绝永久删除: {path}")
+    path.unlink()
+    if path.exists():
+        raise OSError(f"删除调用结束后文件仍存在: {path}")
+    return current_digest
 
 
 def load_settings(config_path: str | Path | None = None) -> dict:
@@ -1929,7 +1954,11 @@ def extract_archive(
             shutil.rmtree(stage)
             target.mkdir(parents=False, exist_ok=False)
         if cfg.get("delete_archives_after_extract", False):
-            archive.unlink()
+            guarded_unlink(
+                archive,
+                "删除已成功展开的原压缩包",
+                expected_digest=digest,
+            )
         else:
             archive_store = Path(cfg["archive_store"])
             archive_store.mkdir(parents=True, exist_ok=True)
@@ -2080,7 +2109,7 @@ def classify_inbox(cfg: dict) -> ClassificationStats:
         if is_video(path, classification):
             size = path.stat().st_size
             if classification.get("delete_videos", False):
-                path.unlink()
+                guarded_unlink(path, "删除不进行识别的视频文件")
                 stats.videos_deleted += 1
                 stats.video_bytes_deleted += size
                 print(f"视频已永久删除且未识别: {path.name}")
@@ -2267,9 +2296,17 @@ def mineru_submit(
             on_batch_created(batch)
         urls = data["file_urls"]
         for part, url in zip(group, urls, strict=True):
-            with part.path.open("rb") as f:
-                upload = requests.put(url, data=f, timeout=600)
-                upload.raise_for_status()
+            try:
+                with part.path.open("rb") as f:
+                    upload = requests.put(url, data=f, timeout=600)
+                    upload.raise_for_status()
+            except requests.RequestException as exc:
+                raise MinerURetryLater(
+                    "MinerU文件上传暂时失败，已保留任务等待自动重试: "
+                    + safe_provider_diagnostic(
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                ) from None
         preferred_slot = slot
     return batches
 
@@ -2314,7 +2351,10 @@ def mineru_wait(
             raise MinerURetryLater(
                 "MinerU历史任务轮询连接连续中断，"
                 "已重建连接池并保留原任务等待下轮重试: "
-                f"{last_connection_error}"
+                + safe_provider_diagnostic(
+                    f"{type(last_connection_error).__name__}: "
+                    f"{last_connection_error}"
+                )
             )
         if r.status_code == 429:
             raise MinerURetryLater(
@@ -2459,7 +2499,9 @@ def download_mineru_zip(
         ) as exc:
             if isinstance(exc, requests.RequestException):
                 reset_mineru_http_session()
-            failures.append(f"{type(exc).__name__}: {exc}")
+            failures.append(
+                safe_provider_diagnostic(f"{type(exc).__name__}: {exc}")
+            )
             if attempt < attempts:
                 time.sleep(min(8, 2 ** (attempt - 1)))
     raise MinerURetryLater(
@@ -2468,7 +2510,7 @@ def download_mineru_zip(
     )
 
 
-def validate_mineru_zip(archive_path: Path, output: Path | None = None) -> None:
+def validate_mineru_zip(archive_path: Path, output: Path | None = None) -> int:
     """Reject unsafe or unexpectedly large MinerU result archives."""
     expanded_bytes = 0
     root = output.resolve() if output is not None else None
@@ -2498,10 +2540,16 @@ def validate_mineru_zip(archive_path: Path, output: Path | None = None) -> None:
                     raise RuntimeError(
                         f"MinerU结果包含不安全路径: {member.filename}"
                     )
+    return expanded_bytes
 
 
 def extract_mineru_zip(archive_path: Path, output: Path) -> None:
-    validate_mineru_zip(archive_path, output)
+    expanded_bytes = validate_mineru_zip(archive_path, output)
+    free_bytes = shutil.disk_usage(output.parent).free
+    if free_bytes - expanded_bytes < MIN_MINERU_RESULT_FREE_BYTES:
+        raise RuntimeError(
+            "MinerU结果解压后将使剩余空间低于512MB安全余量，拒绝解压"
+        )
     output.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive_path) as archive:
         archive.extractall(output)
@@ -6112,7 +6160,22 @@ def sync_manual_deletions(
     if not dry_run:
         require_manual_deletion_sync_confirmation()
     payload = json.loads(selection_path.read_text("utf-8"))
-    if payload.get("detection") == "live_state_db_and_filesystem":
+    detection_kind = str(payload.get("detection") or "")
+    supported_detection_kinds = {
+        "live_state_db_and_filesystem",
+        "pending_manual_deletion_resume",
+        "historical_manual_deletion_sha_closure",
+    }
+    if detection_kind not in supported_detection_kinds:
+        raise RuntimeError(
+            "手动删除差异文件类型无法验证，拒绝执行"
+        )
+
+    def strictly_under(candidate: Path, roots: tuple[Path, ...]) -> bool:
+        resolved = candidate.resolve()
+        return any(resolved != root and root in resolved.parents for root in roots)
+
+    if detection_kind == "live_state_db_and_filesystem":
         for collection, path_key in (
             (payload.get("newly_missing_markdown", []), "markdown_path"),
             (payload.get("newly_missing_sources", []), "source_path"),
@@ -6120,9 +6183,16 @@ def sync_manual_deletions(
             for item in collection:
                 group_id = str(item.get("group_id") or "")
                 snapshot = int(item.get("group_updated_at") or 0)
-                trigger_path = Path(str(item.get(path_key) or ""))
+                raw_trigger_path = str(item.get(path_key) or "").strip()
+                if not raw_trigger_path:
+                    raise RuntimeError(
+                        f"手动删除差异缺少触发路径: {group_id or '(empty)'}"
+                    )
+                trigger_path = Path(raw_trigger_path).resolve()
                 current = db.execute(
-                    "SELECT updated_at FROM groups WHERE group_id=?", (group_id,)
+                    """SELECT updated_at,markdown_path,raw_path
+                    FROM groups WHERE group_id=?""",
+                    (group_id,),
                 ).fetchone()
                 if not current or snapshot <= 0:
                     raise RuntimeError(
@@ -6132,7 +6202,43 @@ def sync_manual_deletions(
                     raise RuntimeError(
                         f"资料组在检测后已变化，拒绝使用过期删除差异: {group_id}"
                     )
-                if not str(trigger_path) or trigger_path.is_file():
+                if path_key == "markdown_path":
+                    allowed_trigger_paths = {
+                        Path(value).resolve()
+                        for value in (current["markdown_path"], current["raw_path"])
+                        if value
+                    }
+                    allowed_roots_for_trigger = (
+                        cfg["folders"]["markdown"].resolve(),
+                    )
+                else:
+                    source_rows = db.execute(
+                        """SELECT gf.source_path,
+                        f.source_path AS canonical_source
+                        FROM group_files gf
+                        LEFT JOIN files f ON f.sha256=gf.sha256
+                        WHERE gf.group_id=?""",
+                        (group_id,),
+                    ).fetchall()
+                    allowed_trigger_paths = {
+                        Path(value).resolve()
+                        for row in source_rows
+                        for value in (row["source_path"], row["canonical_source"])
+                        if value
+                    }
+                    allowed_roots_for_trigger = (
+                        cfg["folders"]["inbox"].resolve(),
+                        cfg["folders"]["failed"].resolve(),
+                    )
+                if (
+                    trigger_path not in allowed_trigger_paths
+                    or not strictly_under(trigger_path, allowed_roots_for_trigger)
+                ):
+                    raise RuntimeError(
+                        "删除触发路径不属于所选资料组，拒绝级联删除: "
+                        f"{trigger_path}"
+                    )
+                if trigger_path.exists():
                     raise RuntimeError(
                         f"删除触发路径已恢复或被替换，拒绝级联删除: {trigger_path}"
                     )
@@ -6170,7 +6276,7 @@ def sync_manual_deletions(
             + "、".join(missing[:10])
         )
 
-    if payload.get("detection") == "live_state_db_and_filesystem":
+    if detection_kind == "live_state_db_and_filesystem":
         group_snapshots = {
             str(item.get("group_id") or ""): int(item.get("updated_at") or 0)
             for item in payload.get("related_group_snapshots", [])
@@ -6237,7 +6343,6 @@ def sync_manual_deletions(
                         (str(row["group_id"]), str(Path(raw_path).resolve()))
                     ] = digest
 
-    detection_kind = str(payload.get("detection") or "")
     group_markdown_manifests: dict[str, dict[str, str]] = {}
     group_expected_markdown_manifests: dict[str, dict[str, str]] = {}
     manifest_errors: dict[str, list[str]] = {}
@@ -7533,6 +7638,16 @@ def process(
     ).fetchone()
     if not path_row or not decode_batch_ids(path_row["batch_id"]):
         wait_until_stable(source)
+    if source.suffix.casefold() in DIRECT_TEXT:
+        direct_text_limit = max(
+            1,
+            int(cfg["mineru"].get("max_mb", 200)),
+        ) * 1024 * 1024
+        if source.stat().st_size > direct_text_limit:
+            raise RuntimeError(
+                "直接文本文件超过本地处理上限，"
+                f"当前上限为{direct_text_limit // (1024 * 1024)}MB"
+            )
     digest = stable_sha256(source)
     row = (
         path_row
@@ -8078,6 +8193,7 @@ def is_permanent_source_parse_error(error: str) -> bool:
         "EOF marker not found",
         "PDF单页超过MinerU",
         "非PDF文件超过MinerU",
+        "直接文本文件超过本地处理上限",
         "model_version 'vlm' cannot process",
     )
     return any(marker.casefold() in error.casefold() for marker in permanent_markers)

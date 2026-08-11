@@ -139,6 +139,18 @@ if (-not (Test-Path $WeKnoraEnv)) {
 # from being exposed to the LAN while keeping the documented UI port stable.
 Set-DotEnvValue $WeKnoraEnv "APP_PORT" "127.0.0.1:8080"
 Set-DotEnvValue $WeKnoraEnv "FRONTEND_PORT" "127.0.0.1:8088"
+$ProjectHasher = [Security.Cryptography.SHA256]::Create()
+try {
+    $ProjectSuffix = ([BitConverter]::ToString(
+        $ProjectHasher.ComputeHash(
+            [Text.Encoding]::UTF8.GetBytes($Root.ToLowerInvariant())
+        )
+    )).Replace('-', '').Substring(0, 12).ToLowerInvariant()
+} finally { $ProjectHasher.Dispose() }
+# Keep Compose ownership stable for this clone and distinct from another clone.
+# Upstream uses fixed container_name values, so a second concurrent stack still
+# fails closed, but it cannot be mistaken for containers owned by this clone.
+Set-DotEnvValue $WeKnoraEnv "COMPOSE_PROJECT_NAME" "question-bank-$ProjectSuffix"
 # The checked-out source and the official container images must stay on the
 # same release. Leaving this at upstream's mutable `latest` silently mixes a
 # pinned CLI/source tree with a different backend after a later image pull.

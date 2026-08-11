@@ -39,16 +39,29 @@ function Show-UnauthenticatedMcpRejection([string]$Uri) {
 
 foreach ($Name in "proxy", "cloudflared") {
     $PidFile = Join-Path $Base "$Name.pid"
-    $State = "stopped"
+    $SavedPid = 0
     if (Test-Path $PidFile) {
         try { $SavedPid = [int](Get-Content -Raw -LiteralPath $PidFile) } catch { $SavedPid = 0 }
-        $Row = if ($SavedPid) { Get-CimInstance Win32_Process -Filter "ProcessId=$SavedPid" -ErrorAction SilentlyContinue } else { $null }
-        $Spec = $Expected[$Name]
-        if ($Row -and $Row.ExecutablePath -and (Test-Path $Spec.Path) -and
-            [IO.Path]::GetFullPath($Row.ExecutablePath).Equals([IO.Path]::GetFullPath($Spec.Path), [StringComparison]::OrdinalIgnoreCase) -and
-            $Row.CommandLine -match $Spec.Pattern) {
-            $State = "running (PID $SavedPid, verified executable)"
-        } else { $State = "stale PID file" }
+    }
+    $Spec = $Expected[$Name]
+    $Managed = @()
+    if (Test-Path $Spec.Path) {
+        $ExpectedPath = [IO.Path]::GetFullPath($Spec.Path)
+        $Managed = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.ExecutablePath -and
+            [IO.Path]::GetFullPath($_.ExecutablePath).Equals($ExpectedPath, [StringComparison]::OrdinalIgnoreCase) -and
+            $_.CommandLine -match $Spec.Pattern
+        })
+    }
+    $State = if ($Managed.Count -gt 1) {
+        "ERROR: duplicate managed processes (PIDs $(@($Managed.ProcessId) -join ', '))"
+    } elseif ($Managed.Count -eq 1) {
+        $Suffix = if ($SavedPid -eq $Managed[0].ProcessId) { "verified PID file" } else { "PID file missing or stale" }
+        "running (PID $($Managed[0].ProcessId), $Suffix)"
+    } elseif (Test-Path $PidFile) {
+        "stopped (stale PID file)"
+    } else {
+        "stopped"
     }
     Write-Host "$Name`: $State"
 }
