@@ -17,6 +17,8 @@ It does not ship the author's documents, API keys, accounts, domain names, knowl
 IDs, or runtime database. It is not a hosted service; each user owns the documents and the
 service accounts used to process them.
 
+![Pipeline from source files to three retrieval layers](assets/pipeline.png)
+
 ## What the pipeline does
 
 ```text
@@ -48,6 +50,13 @@ default.
 The project does not replace MinerU, WeKnora, Ollama, OAuth, a vector database, Wiki, or
 Neo4j. `ingest.py` moves data between those existing components, records resumable state,
 and handles failure recovery.
+
+## See the output first
+
+The [minimal structure example](examples/minimal-physics/README.md) shows how a separate
+question and solution become parent, child, and raw records. The oscillator problem was
+written for this repository. Reading the example does not call a cloud API or require a real
+question bank.
 
 ## Safe defaults
 
