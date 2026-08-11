@@ -12580,7 +12580,9 @@ def main() -> None:
     db = db_open()
     reconcile_appledouble_history(db)
     if args.detect_manual_deletions is not None:
-        with single_instance(".manual-deletion-detect.lock"):
+        with single_instance(".mutation.lock"), single_instance(
+            ".manual-deletion-detect.lock"
+        ):
             result = detect_manual_deletions(
                 cfg,
                 db,
@@ -12590,7 +12592,9 @@ def main() -> None:
         db.close()
         return
     if args.sync_manual_deletions is not None:
-        with single_instance(".manual-deletion-sync.lock"):
+        with single_instance(".mutation.lock"), single_instance(
+            ".manual-deletion-sync.lock"
+        ):
             result = sync_manual_deletions(
                 cfg,
                 db,
@@ -12601,12 +12605,16 @@ def main() -> None:
         db.close()
         return
     if args.repair_state:
-        with single_instance(".state-repair.lock"):
+        with single_instance(".mutation.lock"), single_instance(
+            ".state-repair.lock"
+        ):
             result = repair_stale_state_metadata(db)
         print(json.dumps(result, ensure_ascii=False))
         return
     if args.migrate_content_structure:
-        with single_instance(".content-migration.lock"):
+        with single_instance(".mutation.lock"), single_instance(
+            ".content-migration.lock"
+        ):
             migrate_content_structure(
                 cfg,
                 db,
@@ -12616,7 +12624,9 @@ def main() -> None:
         return
     if args.recover_missing_sources:
         db.close()
-        with single_instance(".source-recovery.lock"):
+        with single_instance(".mutation.lock"), single_instance(
+            ".source-recovery.lock"
+        ):
             result = recover_missing_source_batches(
                 cfg, max(0, args.recovery_limit)
             )
@@ -12624,7 +12634,9 @@ def main() -> None:
         return
     if args.index_recovered:
         db.close()
-        with single_instance(".ingest.lock"):
+        with single_instance(".mutation.lock"), single_instance(
+            ".ingest.lock"
+        ):
             result = process_recovered_groups(
                 cfg, max(0, args.recovery_limit)
             )
@@ -12897,19 +12909,22 @@ def main() -> None:
         )
         return
     if args.migrate_indexes:
-        with single_instance():
+        with single_instance(".mutation.lock"), single_instance():
             migrate_lightweight_indexes(cfg, db)
         return
     if args.classification_dry_run:
-        migrate_classified_markdown(
-            cfg,
-            db,
-            dry_run=True,
-            delete_old_indexes=False,
-        )
+        with single_instance(".mutation.lock"):
+            migrate_classified_markdown(
+                cfg,
+                db,
+                dry_run=True,
+                delete_old_indexes=False,
+            )
         return
     if args.migrate_classification:
-        with single_instance(".classification.lock"):
+        with single_instance(".mutation.lock"), single_instance(
+            ".classification.lock"
+        ):
             migrate_classified_markdown(
                 cfg,
                 db,
@@ -12918,7 +12933,7 @@ def main() -> None:
             )
         return
     lock_name = ".prequeue.lock" if args.prequeue_only else ".ingest.lock"
-    with single_instance(lock_name):
+    with single_instance(".mutation.lock"), single_instance(lock_name):
         prequeue_guard = (
             single_instance(".prequeue.lock")
             if not args.prequeue_only

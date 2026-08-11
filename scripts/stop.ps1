@@ -7,7 +7,7 @@ $Runtime = Join-Path $Root ".runtime"
 $WslExe = Join-Path $env:WINDIR "System32\wsl.exe"
 $DistroFile = Join-Path $Runtime "wsl-distro.txt"
 if (-not $WslDistro -and (Test-Path $DistroFile)) {
-    $WslDistro = (Get-Content -Raw -LiteralPath $DistroFile).Trim()
+    $WslDistro = (Get-Content -Raw -Encoding UTF8 -LiteralPath $DistroFile).Trim()
 }
 if (-not $WslDistro) { $WslDistro = "Ubuntu" }
 
