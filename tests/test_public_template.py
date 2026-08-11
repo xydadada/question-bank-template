@@ -69,6 +69,11 @@ class PublicTemplateTests(unittest.TestCase):
             "inline-secret",
             ingest.safe_provider_diagnostic("request failed: token=inline-secret"),
         )
+        bearer = ingest.safe_provider_diagnostic(
+            "Authorization: Bearer TOPSECRET"
+        )
+        self.assertNotIn("TOPSECRET", bearer)
+        self.assertNotIn("Bearer", bearer)
         source = (ROOT / "ingest.py").read_text("utf-8")
         self.assertGreaterEqual(source.count("safe_provider_diagnostic("), 6)
 
@@ -242,6 +247,29 @@ class PublicTemplateTests(unittest.TestCase):
                 0,
             )
             database.close()
+
+    def test_unindexed_file_deletion_requires_gate_and_matching_digest(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "video.mp4"
+            source.write_bytes(b"video bytes")
+            expected = ingest.sha256(source)
+            with mock.patch.dict(
+                os.environ, {"QUESTION_BANK_ALLOW_PERMANENT_DELETE": ""}
+            ):
+                with self.assertRaisesRegex(RuntimeError, "尚未显式确认"):
+                    ingest.guarded_unlink(source, "test delete", expected)
+            self.assertTrue(source.is_file())
+            with mock.patch.dict(
+                os.environ,
+                {"QUESTION_BANK_ALLOW_PERMANENT_DELETE": "I_UNDERSTAND"},
+            ):
+                with self.assertRaisesRegex(RuntimeError, "摘要已变化"):
+                    ingest.guarded_unlink(source, "test delete", "0" * 64)
+                self.assertTrue(source.is_file())
+                ingest.guarded_unlink(source, "test delete", expected)
+            self.assertFalse(source.exists())
 
     def test_pending_deletion_audit_is_reconciled_without_redeleting(self) -> None:
         """Startup recovery records the observed outcome of an interrupted delete."""
@@ -1115,6 +1143,16 @@ class PublicTemplateTests(unittest.TestCase):
         self.assertIn("DNS was not changed", setup)
         self.assertIn("mcp-public\\start-all.ps1 -ExternalUrl https://$Hostname", setup)
 
+    def test_chatgpt_mcp_docs_follow_current_official_plugin_flow(self) -> None:
+        documentation = (ROOT / "docs" / "CHATGPT_MCP.md").read_text("utf-8")
+        self.assertIn("Security and login", documentation)
+        self.assertIn("ChatGPT Plugins", documentation)
+        self.assertIn(
+            "https://developers.openai.com/plugins/deploy/connect-chatgpt",
+            documentation,
+        )
+        self.assertNotIn("启用实时访问或索引搜索", documentation)
+
     def test_workflow_actions_are_immutable(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "audit.yml").read_text("utf-8")
         uses = re.findall(r"(?m)^\s*uses:\s*\S+@([^\s#]+)", workflow)
@@ -1178,6 +1216,24 @@ class PublicTemplateTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "不安全路径"):
                 ingest.validate_mineru_zip(archive_path)
 
+    def test_mineru_result_zip_reserves_disk_space_before_extraction(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "result.zip"
+            output = root / "expanded"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("full.md", "# result")
+            with mock.patch.object(
+                ingest.shutil,
+                "disk_usage",
+                return_value=mock.Mock(free=128 * 1024**2),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "512MB安全余量"):
+                    ingest.extract_mineru_zip(archive_path, output)
+            self.assertFalse(output.exists())
+
     def test_recovered_mineru_results_reject_duplicates_before_download(self) -> None:
         import ingest
 
@@ -1233,6 +1289,94 @@ class PublicTemplateTests(unittest.TestCase):
                         preferred_slot="primary",
                     )
         persisted.assert_not_called()
+
+    def test_mineru_upload_error_does_not_expose_signed_url(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "sample.pdf"
+            source.write_bytes(b"pdf")
+            part = ingest.SourcePart(source, 0)
+            batch_result = {
+                "data": {
+                    "batch_id": "batch-1",
+                    "file_urls": [
+                        "https://upload.example.invalid/file?signature=TOPSECRET"
+                    ],
+                }
+            }
+            response = mock.Mock()
+            response.raise_for_status.side_effect = ingest.requests.HTTPError(
+                "403 for https://upload.example.invalid/file?signature=TOPSECRET"
+            )
+            with mock.patch.object(
+                ingest,
+                "mineru_create_batch",
+                return_value=(batch_result, "primary"),
+            ), mock.patch.object(
+                ingest.requests, "put", return_value=response
+            ):
+                with self.assertRaises(ingest.MinerURetryLater) as raised:
+                    ingest.mineru_submit(
+                        [part],
+                        {"primary": "placeholder-value"},
+                        {},
+                    )
+        message = str(raised.exception)
+        self.assertNotIn("TOPSECRET", message)
+        self.assertNotIn("upload.example.invalid", message)
+
+    def test_mineru_download_error_does_not_expose_signed_url(self) -> None:
+        import ingest
+
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        response.status_code = 403
+        response.raise_for_status.side_effect = ingest.requests.HTTPError(
+            "403 for https://download.example.invalid/result?token=TOPSECRET"
+        )
+        session = mock.Mock()
+        session.get.return_value = response
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            ingest, "mineru_http_session", return_value=session
+        ), mock.patch.object(ingest, "reset_mineru_http_session"):
+            with self.assertRaises(ingest.MinerURetryLater) as raised:
+                ingest.download_mineru_zip(
+                    "https://download.example.invalid/result?token=TOPSECRET",
+                    Path(temporary) / "job" / "result.zip",
+                    attempts=1,
+                )
+        message = str(raised.exception)
+        self.assertNotIn("TOPSECRET", message)
+        self.assertNotIn("download.example.invalid", message)
+
+    def test_oversized_direct_text_is_rejected_before_hashing_or_reading(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "large.md"
+            with source.open("wb") as handle:
+                handle.seek(2 * 1024 * 1024)
+                handle.write(b"x")
+            folders = {
+                name: root / name
+                for name in ("inbox", "failed", "markdown", "work")
+            }
+            for folder in folders.values():
+                folder.mkdir()
+            with mock.patch.object(ingest, "ROOT", root):
+                database = ingest.db_open()
+            cfg = {"folders": folders, "mineru": {"max_mb": 1}}
+            with mock.patch.object(ingest, "wait_until_stable"), mock.patch.object(
+                ingest,
+                "stable_sha256",
+                side_effect=AssertionError("oversized file must not be hashed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "直接文本文件超过"):
+                    ingest.process(source, cfg, database, defer_index=True)
+            database.close()
 
     def test_recovered_mineru_results_reject_duplicate_explicit_page_ranges(self) -> None:
         import ingest
@@ -1440,6 +1584,14 @@ class PublicTemplateTests(unittest.TestCase):
         self.assertIn("Stop-ProcessTree ([int]$Row.ProcessId)", start)
         self.assertIn("Stop-ProcessTree ([int]$Row.ProcessId)", stop)
 
+    def test_status_detects_managed_processes_without_trusting_pid_files(self) -> None:
+        stack_status = (ROOT / "scripts" / "status.ps1").read_text("utf-8")
+        mcp_status = (ROOT / "mcp-public" / "status.ps1").read_text("utf-8")
+        for source in (stack_status, mcp_status):
+            self.assertIn("Get-CimInstance Win32_Process", source)
+            self.assertIn("PID file missing or stale", source)
+            self.assertIn("duplicate managed processes", source)
+
     def test_mcp_startup_failure_stops_the_proxy_process_tree(self) -> None:
         start = (ROOT / "mcp-public" / "start.ps1").read_text("utf-8")
         stop = (ROOT / "mcp-public" / "stop.ps1").read_text("utf-8")
@@ -1470,6 +1622,11 @@ class PublicTemplateTests(unittest.TestCase):
             'Set-DotEnvValue $WeKnoraEnv "WEKNORA_VERSION" $WeKnoraVersion',
             bootstrap,
         )
+        self.assertIn(
+            'Set-DotEnvValue $WeKnoraEnv "COMPOSE_PROJECT_NAME"',
+            bootstrap,
+        )
+        self.assertIn("$Root.ToLowerInvariant()", bootstrap)
         self.assertIn("pypdf>=6.15.0", project["project"]["dependencies"])
         self.assertIn('Join-Path $WeKnora "docker-compose.override.yml"', bootstrap)
         self.assertEqual(bootstrap.count("restart: unless-stopped"), 2)
@@ -1530,6 +1687,121 @@ class PublicTemplateTests(unittest.TestCase):
                         cfg, database, selection, dry_run=False
                     )
             self.assertEqual(source.read_bytes(), b"new replacement bytes")
+            database.close()
+
+    def test_live_manual_deletion_rejects_empty_or_unbound_trigger_path(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            folders = {
+                name: root / name
+                for name in ("inbox", "failed", "markdown", "work")
+            }
+            for folder in folders.values():
+                folder.mkdir()
+            source = folders["inbox"] / "source.pdf"
+            parent = folders["markdown"] / "parent.md"
+            source.write_bytes(b"source bytes")
+            parent.write_text("# parent", encoding="utf-8")
+            digest = ingest.sha256(source)
+            with mock.patch.object(ingest, "ROOT", root):
+                database = ingest.db_open()
+            updated_at = int(time.time()) - 120
+            database.execute(
+                """INSERT INTO files(
+                    sha256,source_path,state,error,updated_at,metrics_json
+                ) VALUES(?,?,?,?,?,?)""",
+                (digest, str(source), "completed", "", updated_at, "{}"),
+            )
+            database.execute(
+                """INSERT INTO groups(
+                    group_id,group_name,state,markdown_path,updated_at
+                ) VALUES(?,?,?,?,?)""",
+                ("group-1", "group-1", "completed", str(parent), updated_at),
+            )
+            database.execute(
+                "INSERT INTO group_files(group_id,sha256,source_path) VALUES(?,?,?)",
+                ("group-1", digest, str(source)),
+            )
+            database.commit()
+            cfg = {
+                "folders": folders,
+                "cleanup": {"permanently_delete_source_after_search": False},
+            }
+            selection = folders["work"] / "selection.json"
+            base_payload = {
+                "detection": "live_state_db_and_filesystem",
+                "newly_missing_markdown": [],
+                "related_group_snapshots": [
+                    {"group_id": "group-1", "updated_at": str(updated_at)}
+                ],
+                "existing_markdown_snapshots": [
+                    {
+                        "group_id": "group-1",
+                        "path": str(parent),
+                        "sha256": ingest.sha256(parent),
+                    }
+                ],
+            }
+            with mock.patch.dict(
+                os.environ,
+                {"QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC": "I_UNDERSTAND"},
+            ):
+                for trigger, message in (
+                    ("", "缺少触发路径"),
+                    (str(folders["inbox"] / "forged.pdf"), "不属于所选资料组"),
+                ):
+                    payload = dict(base_payload)
+                    payload["newly_missing_sources"] = [
+                        {
+                            "group_id": "group-1",
+                            "group_updated_at": str(updated_at),
+                            "source_path": trigger,
+                        }
+                    ]
+                    selection.write_text(
+                        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+                    )
+                    with self.subTest(trigger=trigger):
+                        with self.assertRaisesRegex(RuntimeError, message):
+                            ingest.sync_manual_deletions(
+                                cfg, database, selection, dry_run=False
+                            )
+                        self.assertTrue(source.is_file())
+                        self.assertTrue(parent.is_file())
+            database.close()
+
+    def test_manual_deletion_rejects_unknown_manifest_kind(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            selection = root / "selection.json"
+            selection.write_text(
+                json.dumps({"detection": "untrusted_external_manifest"}),
+                encoding="utf-8",
+            )
+            folders = {
+                name: root / name
+                for name in ("inbox", "failed", "markdown", "work")
+            }
+            for folder in folders.values():
+                folder.mkdir()
+            with mock.patch.object(ingest, "ROOT", root):
+                database = ingest.db_open()
+            with self.assertRaisesRegex(RuntimeError, "类型无法验证"):
+                ingest.sync_manual_deletions(
+                    {
+                        "folders": folders,
+                        "cleanup": {
+                            "permanently_delete_source_after_search": False
+                        },
+                    },
+                    database,
+                    selection,
+                    dry_run=True,
+                )
             database.close()
 
     def test_manual_deletion_preserves_replaced_markdown_and_remote_indexes(self) -> None:
