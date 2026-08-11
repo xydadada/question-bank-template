@@ -39,22 +39,6 @@ function Get-ManagedProcess(
     [string]$CommandPattern
 ) {
     $Expected = [IO.Path]::GetFullPath($ExpectedExecutable)
-    $SharedWslPath = [IO.Path]::GetFullPath($WslExe)
-    if ($Expected.Equals($SharedWslPath, [StringComparison]::OrdinalIgnoreCase)) {
-        if (-not (Test-Path $PidFile)) { return $null }
-        try { $SavedPid = [int](Get-Content -Raw -LiteralPath $PidFile) } catch {
-            Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
-            return $null
-        }
-        $SavedRow = Get-CimInstance Win32_Process -Filter "ProcessId=$SavedPid" -ErrorAction SilentlyContinue
-        if ($SavedRow -and $SavedRow.ExecutablePath -and
-            [IO.Path]::GetFullPath($SavedRow.ExecutablePath).Equals($Expected, [StringComparison]::OrdinalIgnoreCase) -and
-            (!$CommandPattern -or $SavedRow.CommandLine -match $CommandPattern)) {
-            return $SavedRow
-        }
-        Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
-        return $null
-    }
     $Managed = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
         $_.ExecutablePath -and
         [IO.Path]::GetFullPath($_.ExecutablePath).Equals($Expected, [StringComparison]::OrdinalIgnoreCase) -and
@@ -163,7 +147,8 @@ try {
         $MutexHasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($Root.ToLowerInvariant()))
     )).Replace('-', '').Substring(0, 24)
 } finally { $MutexHasher.Dispose() }
-$StartMutex = [Threading.Mutex]::new($false, "Local\QuestionBank-$MutexDigest-StackStart")
+$KeepAliveToken = "question-bank-$MutexDigest"
+$StartMutex = [Threading.Mutex]::new($false, "Local\QuestionBank-$MutexDigest-StackLifecycle")
 $StartMutexOwned = $false
 try { $StartMutexOwned = $StartMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $StartMutexOwned = $true }
 if (-not $StartMutexOwned) {
@@ -183,7 +168,8 @@ if ($PreviousDistro -and -not $PreviousDistro.Equals($WslDistro, [StringComparis
 }
 [IO.File]::WriteAllText($DistroFile, $WslDistro, [Text.UTF8Encoding]::new($false))
 $DistroPattern = [regex]::Escape($WslDistro)
-$KeepAlivePattern = '(?i)-d\s+"?' + $DistroPattern + '"?.*sleep\s+infinity'
+$KeepAliveIdentityPattern = '(?i)QUESTION_BANK_KEEPALIVE=' + [regex]::Escape($KeepAliveToken) + '.*sleep\s+infinity'
+$KeepAlivePattern = '(?i)-d\s+"?' + $DistroPattern + '"?.*' + $KeepAliveIdentityPattern
 $KeepAliveStarted = $false
 $ComposeUpAttempted = $false
 $InitialComposeServices = @()
@@ -203,10 +189,20 @@ $CloudflaredConfig = Join-Path $Root "mcp-public\cloudflare\config.yml"
 $TunnelPattern = '(?i)tunnel.*' + [regex]::Escape($CloudflaredConfig) + '.*run'
 
 try {
+    $ExpectedWslPath = [IO.Path]::GetFullPath($WslExe)
+    $WrongDistroKeepAlive = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.ExecutablePath -and
+        [IO.Path]::GetFullPath($_.ExecutablePath).Equals($ExpectedWslPath, [StringComparison]::OrdinalIgnoreCase) -and
+        $_.CommandLine -match $KeepAliveIdentityPattern -and
+        $_.CommandLine -notmatch $KeepAlivePattern
+    })
+    if ($WrongDistroKeepAlive.Count) {
+        throw "This template already owns a WSL keepalive for another distro. Run scripts/stop.ps1 -StopWeKnora before switching distros."
+    }
     $KeepAlive = Get-ManagedProcess $KeepAlivePid $WslExe $KeepAlivePattern
     if (-not $KeepAlive) {
         $KeepAliveProcess = Start-Process -FilePath $WslExe `
-            -ArgumentList @("-d", $WslDistro, "--", "sleep", "infinity") `
+            -ArgumentList @("-d", $WslDistro, "--", "env", "QUESTION_BANK_KEEPALIVE=$KeepAliveToken", "sleep", "infinity") `
             -WindowStyle Hidden -PassThru
         [IO.File]::WriteAllText($KeepAlivePid, [string]$KeepAliveProcess.Id, [Text.UTF8Encoding]::new($false))
         $KeepAliveStarted = $true
