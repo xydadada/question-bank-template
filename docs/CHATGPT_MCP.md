@@ -72,8 +72,8 @@ powershell -File .\mcp-public\status.ps1
 启动脚本不会只看代理端口。公开 Tunnel 之前，它会用专用的 `mcp-readonly`
 Profile 重新执行 CLI doctor、确认父块、子块和原文三个已配置知识库都对该 Key
 可见，并在父块、子块和原文三层分别完成一次限制为1条结果的真实混合检索。
-凭据失效、任一层权限
-丢失或 Embedding 链路不可用时启动会直接失败，不会把 `/healthz` 正常误报为
+凭据失效、任一层权限丢失或 Embedding 链路不可用时，启动会直接失败，不会把
+`/healthz` 正常误报为
 “ChatGPT 已可检索”。
 
 确认公网 `https://mcp.your-domain.example/healthz` 可达后，在实际使用的 ChatGPT

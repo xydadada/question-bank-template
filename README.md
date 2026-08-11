@@ -1,65 +1,91 @@
-# Question Bank Template
+# MinerU → WeKnora 题库模板
 
-一个面向 Windows 11 + WSL2 的自托管题库流水线模板。它组合 MinerU、MiMo、
-WeKnora、Ollama 和官方 WeKnora MCP，不包含任何作者的题库、密钥、账号、域名、
-知识库 ID 或运行数据库。
+[中文](README.md) | [English](README.en.md)
 
-> 当前版本是可复用的工程模板，不是托管服务。上传什么资料、使用什么 API、
-> 是否公开 MCP，以及是否删除源文件，都由每位使用者自行决定。
+[![Release](https://img.shields.io/github/v/release/xydadada/question-bank-template)](https://github.com/xydadada/question-bank-template/releases/latest)
+[![Audit](https://img.shields.io/github/actions/workflow/status/xydadada/question-bank-template/audit.yml?branch=main&label=audit)](https://github.com/xydadada/question-bank-template/actions/workflows/audit.yml)
+[![License](https://img.shields.io/github/license/xydadada/question-bank-template)](LICENSE)
+[![Use this template](https://img.shields.io/badge/use_this-template-2ea44f)](https://github.com/new?template_owner=xydadada&template_name=question-bank-template)
 
-## 它会做什么
+这不是另一套 RAG 框架。这个仓库把题库入库前后的杂活接成一条可恢复的流水线：
+MinerU 负责解析，MiMo 补题图说明，WeKnora 保存并检索父块、子块和原文，官方
+WeKnora MCP 可以把只读检索接到 ChatGPT。
+
+模板面向 Windows 11 和 WSL2。仓库里只有代码与空配置，不附带作者的题库、密钥、
+账号、域名、知识库 ID 或运行数据库。它也不是托管服务。资料和服务账号始终由使用者
+自己管理。
+
+## 处理流程
 
 ```text
-inbox 中的文件或压缩包
-→ 分类文件类型并跳过视频
-→ MinerU 解析
-→ MiMo 补充重要图片说明
-→ 题目与答案按资料组关联
+inbox 中的文件、文件夹或压缩包
+→ 识别文件类型，视频不进入解析
+→ MinerU 解析文档
+→ MiMo 判断并描述重要题图
+→ 按资料组关联题目与答案
 → 生成父块、子块和原文三层 Markdown
-→ 自动分类并上传三个 WeKnora 知识库
-→ 三层向量 + BM25 混合检索
-→ 可选：官方受限 MCP + OAuth + Cloudflare Tunnel + ChatGPT
+→ 按资料类型、机构和物理模块分类
+→ 上传三个 WeKnora 知识库
+→ 向量与 BM25 混合检索
+→ 可选：OAuth + Cloudflare Tunnel + 官方 WeKnora MCP + ChatGPT
 ```
 
-图片描述和不确定分类默认走 MiMo；本地只需运行 Embedding。模板不自动配置
-Wiki、图谱、摘要或 Rerank，永久删除默认关闭。
+图片说明和不确定分类默认使用 MiMo。本机只需要运行 Embedding。Wiki、图谱、摘要
+和 Rerank 不在默认流程中，永久删除也默认关闭。
+
+## 这个模板适合什么情况
+
+- 资料来源杂，既有 PDF，也有 Office 文档、图片、文件夹或压缩包。
+- 题目和答案可能分开保存，希望合并后再检索。
+- 希望保留整份原文，同时检索较小的题答块和带上下文的父块。
+- 希望 ChatGPT 能读取本地题库，但不想自己重写 OCR、RAG 或 MCP 服务。
+
+它没有替换 MinerU、WeKnora、Ollama、OAuth、向量数据库、Wiki 或 Neo4j。
+`ingest.py` 只负责在这些现成组件之间传递文件、记录状态并处理失败恢复。
 
 ## 安全默认值
 
-- 不提交 `.env`、`config.local.yaml`、知识库内容、Markdown、日志或 `state.db`。
-- 不自动开机启动，不修改 Windows 计划任务；WeKnora 的 8080/8088 只绑定本机回环地址。
-- 引导脚本把上游 Redis/Neo4j 的重启策略覆盖为 `unless-stopped`，手动停止后
-  Docker 或 Windows 重启不会把它们自行拉起。
-- 压缩包清单流式校验路径、链接、条目数与展开量；同一根压缩包的全部嵌套层
-  共用一份安全预算，不会让内层压缩包重新获得完整额度。
-- 不自动永久删除视频、压缩包、“其他资料”或已入库源文件。
-- 开启源文件、视频或压缩包永久删除选项，必须在本机 `.env` 明确写入
-  `QUESTION_BANK_ALLOW_PERMANENT_DELETE=I_UNDERSTAND`；人工删除级联同步使用
-  独立确认 `QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC=I_UNDERSTAND`，两种授权
-  不会互相代替。
-- MCP 使用独立最小权限 Profile；OAuth 代理只监听 `127.0.0.1:18081`。
-- 官方 MCP 不含建库、上传、修改或删除工具；`chat` 与 `session_ask` 会写入会话记录，
-  严格检索模式必须在 ChatGPT Workspace 中禁用这两项。
+模板默认采用保守设置：
 
-先用可丢弃的小样本确认流程。永久删除无法撤销。
-首次完整运行请按 [最小冒烟确认](docs/SMOKE_TEST.md) 逐项执行；该确认需要下载者
-自己的服务账号和密钥，因此仓库 CI 不会假装完成真实云端端到端调用。
+- `.env`、`config.local.yaml`、题库、Markdown、日志和 `state.db` 都被 Git 忽略。
+- 脚本不会创建开机启动项，也不会修改 Windows 计划任务。
+- WeKnora 的 8080 和 8088 端口只绑定 `127.0.0.1`。
+- Redis 和 Neo4j 使用 `unless-stopped`，手动停止后不会因 Windows 或 Docker 重启而自行恢复。
+- 压缩包会检查路径、链接、成员数量和展开量，嵌套压缩包共用同一份安全预算。
+- 视频、原压缩包、`其他资料`和已入库源文件都不会被自动永久删除。
+- MCP 使用单独的最小权限 Profile，OAuth 代理只监听 `127.0.0.1:18081`。
 
-## 前置条件
+永久删除需要同时修改配置，并在本机 `.env` 写入：
 
-- Windows 11、WSL2 Ubuntu
-- Docker Desktop（推荐路径：启用 Ubuntu 的 WSL integration）
+```dotenv
+QUESTION_BANK_ALLOW_PERMANENT_DELETE=I_UNDERSTAND
+```
+
+人工删除级联同步使用另一道确认门：
+
+```dotenv
+QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC=I_UNDERSTAND
+```
+
+两种确认不能互相代替。首次运行请使用无隐私、可丢弃的小样本，并保持全部删除开关为
+`false`。具体步骤见[最小冒烟确认](docs/SMOKE_TEST.md)。
+
+## 运行前需要准备
+
+- Windows 11 和 WSL2 Ubuntu
+- Docker Desktop，建议启用 Ubuntu 的 WSL integration
 - Git for Windows
-- Python 3.11+（由 `uv` 管理项目环境）
+- Python 3.11+，项目环境由 `uv` 管理
 - [uv](https://docs.astral.sh/uv/)
-- Go 1.26+（只用于编译官方 WeKnora CLI）
+- Go 1.26+，只用于编译官方 WeKnora CLI
 - [Ollama](https://ollama.com/download)
-- 7-Zip 的 `7z` 命令（仅压缩包输入需要）
-- 自己的 MinerU API Key；使用图片补充或模型分类时还需 MiMo API Key
+- 7-Zip 的 `7z` 命令，仅在处理压缩包时需要
+- 自己的 MinerU API Key
+- 使用图片说明或模型兜底分类时，还需要自己的 MiMo API Key
 
-原生 WSL Docker 属于高级配置：容器必须能够访问 Ollama，不能直接假定
-`host.docker.internal:11434` 可用。默认脚本以 Docker Desktop + Windows Ollama 为
-经过验证的组合。
+默认组合是 Docker Desktop、WSL2 Ubuntu 和 Windows Ollama。原生 WSL Docker 也能
+使用，但需要自行处理容器到 Ollama 的网络，不能假定
+`host.docker.internal:11434` 一定可达。
 
 ## 最短安装路径
 
@@ -69,34 +95,20 @@ cd question-bank-template
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1 -StartWeKnora
 ```
 
-脚本只在仓库内创建忽略目录、Python 环境、`.runtime/WeKnora` 和
-`bin/weknora.exe`。缺少需要管理员权限的系统组件时会停止并给出官方链接，
-不会替你静默安装。WeKnora 固定到已核验的 Release 提交，API 与前端分别只绑定
-`127.0.0.1:8080` 和 `127.0.0.1:8088`。
+引导脚本只在仓库内创建 Git 忽略目录、Python 环境、`.runtime/WeKnora` 和
+`bin/weknora.exe`。如果缺少需要管理员权限的系统组件，脚本会停止并给出官方链接，
+不会替你静默安装。WeKnora 固定到经过核验的 Release 提交。
 
-然后：
+安装完成后：
 
-1. 打开 <http://127.0.0.1:8088>，创建或登录你自己的本地 WeKnora 账户。
+1. 打开 <http://127.0.0.1:8088>，创建或登录本地 WeKnora 账户。
 2. 运行 `powershell -File .\scripts\configure-weknora.ps1`，在官方 CLI 中登录。
-3. 把 `.env.example` 复制出的 `.env` 填入自己的 MinerU/MiMo Key。
-4. 将少量可丢弃资料放入 `inbox`。
-5. 启动处理：
+3. 从 `.env.example` 复制出 `.env`，填入自己的 MinerU 和 MiMo Key。
+4. 先把少量可丢弃资料放入 `inbox`。
+5. 启动处理。
 
 ```powershell
 powershell -File .\scripts\start.ps1 -Processing
-```
-
-只有显式启用本地 OCR 时才安装额外依赖，并在本地
-`config.local.yaml` 将 `ollama.ocr_enabled` 改为 `true`：
-
-```powershell
-uv sync --extra ocr
-```
-
-可用以下命令确认 OCR 包已安装；默认 MiMo 路径不需要执行它：
-
-```powershell
-uv run python -c "import rapidocr, onnxruntime; print('OCR extra ready')"
 ```
 
 查看状态或停止：
@@ -107,15 +119,23 @@ powershell -File .\scripts\stop.ps1
 powershell -File .\scripts\stop.ps1 -StopWeKnora
 ```
 
-只做三层检索：
+直接测试三层检索：
 
 ```powershell
 uv run python ingest.py --search "你的检索词"
 ```
 
-## 目录生命周期
+本地 OCR 是可选项。只有明确启用它时才需要安装额外依赖，并在
+`config.local.yaml` 中把 `ollama.ocr_enabled` 改为 `true`。
 
-| 目录 | 用途 | 是否提交 |
+```powershell
+uv sync --extra ocr
+uv run python -c "import rapidocr, onnxruntime; print('OCR extra ready')"
+```
+
+## 本地目录
+
+| 目录 | 内容 | 是否提交 |
 |---|---|---|
 | `inbox/` | 等待处理的用户文件 | 否 |
 | `archives/` | 默认保留的已展开压缩包 | 否 |
@@ -126,11 +146,11 @@ uv run python ingest.py --search "你的检索词"
 | `.runtime/` | WeKnora 源码、日志和 PID | 否 |
 | `profiles/` | 可公开的分类规则模板 | 是 |
 
-源文件删除不是默认行为。开启后，只有三层入库和检索检查完成的资料才进入删除
-逻辑；失败资料仍保留。详细开关见 [配置说明](docs/CONFIGURATION.md)。
-会安全停止而不是猜测处理的边界见 [已知限制](docs/KNOWN_LIMITATIONS.md)。
+源文件删除不是默认行为。启用后，程序也只会处理已完成三层入库和检索检查的资料。
+失败文件仍会保留。开关说明见[配置说明](docs/CONFIGURATION.md)，程序会停止而不是
+猜测处理的情况见[已知限制](docs/KNOWN_LIMITATIONS.md)。
 
-## ChatGPT 受限检索（可选）
+## 接入 ChatGPT，可选
 
 ```powershell
 powershell -File .\scripts\bootstrap.ps1 -InstallMcpTools
@@ -142,38 +162,40 @@ powershell -File .\mcp-public\start-all.ps1 `
   -ExternalUrl https://mcp.your-domain.example
 ```
 
-在实际使用的 ChatGPT Workspace 中，以 OAuth 方式添加
-`https://mcp.your-domain.example/mcp`。完整步骤、安全边界和验证命令见
-[ChatGPT MCP 指南](docs/CHATGPT_MCP.md)。发布前应在 Workspace 中禁用
-`chat` 与 `session_ask`，只保留八个读取/检索工具。
+然后在实际使用的 ChatGPT Workspace 中，通过 OAuth 添加
+`https://mcp.your-domain.example/mcp`。官方 WeKnora MCP 提供十个工具，其中
+`chat` 和 `session_ask` 会创建会话记录。严格只读检索时应由 Workspace 管理员禁用
+这两项，只保留八个读取和检索工具。完整步骤见[ChatGPT MCP 指南](docs/CHATGPT_MCP.md)。
 
-## 自定义分类
+## 分类规则
 
-`profiles/physics-question-bank.yaml` 是物理题库示例。机构别名默认空白；下载者
-应按自己的资料填写。更换学科时复制该文件、调整类型与模块词表，并在
-`config.local.yaml` 修改 `document_classification.taxonomy_file`。
+`profiles/physics-question-bank.yaml` 是物理题库示例，机构别名表有意保持空白。使用者
+应按自己的资料填写。更换学科时可以复制该文件，修改类型和模块词表，再在
+`config.local.yaml` 中设置 `document_classification.taxonomy_file`。
 
-## 项目边界
+## 组件与项目边界
 
-本项目不重写 MinerU、WeKnora、Ollama、MCP、OAuth、向量数据库、Wiki 或
-Neo4j。主要逻辑集中在 `ingest.py`，其余脚本只负责下载官方组件、生成本地配置
-和启动停止。组件来源与固定版本见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+这个仓库使用以下现成项目，不维护它们的分叉版本：
 
-公开模板不是作者私人运行目录的镜像。它不会包含现成知识库、真实知识库 ID、
-账号 Profile、域名、Cloudflare Tunnel、运行数据库、日志、题库文件或私人构建的
-WeKnora CLI。下载者通过官方 CLI 创建自己的三层知识库；模板默认使用官方
-WeKnora MCP，不依赖作者机器上的排序、描述或分页定制。
+- [MinerU](https://github.com/opendatalab/MinerU) 解析文档。
+- [WeKnora](https://github.com/Tencent/WeKnora) 保存知识库、生成索引并提供官方 MCP。
+- [Ollama](https://ollama.com/) 在本机运行 Embedding 和可选 OCR 模型。
+- MiMo 处理重要图片说明和规则无法确定的资料分类。
+
+公开模板不是作者私人运行目录的副本。下载者需要通过官方 CLI 创建自己的三个
+知识库和 Profile。仓库不会提供现成题库、真实知识库 ID、Cloudflare Tunnel、账号、
+域名、日志、运行数据库或私人构建的 WeKnora CLI。第三方来源和固定版本记录在
+[第三方声明](THIRD_PARTY_NOTICES.md)中。
 
 ## 贡献与许可
 
-提交代码前运行：
+提交修改前运行：
 
 ```powershell
 powershell -File .\scripts\release-audit.ps1
 uv run python -m unittest discover -s tests -v
 ```
 
-`.github/workflows/audit.yml` 会在 pull request 和推送到 `main` 时自动运行相同检查；
-所有 Action 都固定到不可变提交。
-
-代码采用 [MIT License](LICENSE)。第三方组件保留各自许可证。
+GitHub Actions 会在 pull request 和推送到 `main` 时重复这些检查。贡献要求见
+[CONTRIBUTING.md](CONTRIBUTING.md)。代码采用 [MIT License](LICENSE)，第三方组件
+保留各自许可证。

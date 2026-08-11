@@ -18,6 +18,12 @@ The checked-in `.github/workflows/audit.yml` runs the same checks for pull
 requests and pushes to `main`. Action references must remain pinned to full
 immutable commit SHAs; Dependabot can propose reviewed updates.
 
+Documentation should describe the current behavior rather than narrate the last
+change. Prefer direct sentences, concrete commands and links to the component
+being discussed. Do not add performance, compatibility or security claims that
+the repository cannot verify. Keep code blocks, option names and safety warnings
+exact when editing prose.
+
 This privacy-safe template accepts only GitHub-provided noreply addresses in
 reachable commit metadata. Before committing, select your GitHub noreply
 address locally and enable **Keep my email addresses private** in GitHub email
