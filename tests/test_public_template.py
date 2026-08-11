@@ -42,6 +42,51 @@ class PublicTemplateTests(unittest.TestCase):
     def test_ingest_parses(self) -> None:
         ast.parse((ROOT / "ingest.py").read_text("utf-8"))
 
+    def test_public_showcase_assets_and_demo(self) -> None:
+        preview = ROOT / "assets" / "social-preview.png"
+        pipeline = ROOT / "assets" / "pipeline.svg"
+        pipeline_png = ROOT / "assets" / "pipeline.png"
+        self.assertLess(preview.stat().st_size, 1_000_000)
+        with Image.open(preview) as image:
+            self.assertEqual(image.size, (1280, 640))
+            self.assertEqual(image.format, "PNG")
+        with Image.open(pipeline_png) as image:
+            self.assertEqual(image.size, (1200, 440))
+            self.assertEqual(image.format, "PNG")
+
+        pipeline_text = pipeline.read_text("utf-8")
+        self.assertIn("parent · child · raw", pipeline_text)
+        self.assertIn("vector + BM25", pipeline_text)
+
+        demo_root = ROOT / "examples" / "minimal-physics"
+        required = (
+            demo_root / "source" / "question.md",
+            demo_root / "source" / "answer.md",
+            demo_root / "expected" / "parent.md",
+            demo_root / "expected" / "child.md",
+            demo_root / "expected" / "raw.md",
+        )
+        self.assertTrue(all(path.is_file() for path in required))
+        for layer in ("parent", "child", "raw"):
+            text = (demo_root / "expected" / f"{layer}.md").read_text("utf-8")
+            self.assertIn(f"index_layer: {layer}", text)
+            self.assertIn("primary_module: 力学", text)
+
+        self.assertIn(
+            "examples/minimal-physics/README.md",
+            (ROOT / "README.md").read_text("utf-8"),
+        )
+        self.assertIn(
+            "examples/minimal-physics/README.md",
+            (ROOT / "README.en.md").read_text("utf-8"),
+        )
+
+        audit = (ROOT / "scripts" / "release-audit.ps1").read_text("utf-8")
+        self.assertIn('"assets/pipeline.png"', audit)
+        self.assertIn('"assets/social-preview.png"', audit)
+        self.assertIn('".svg"', audit)
+        self.assertNotIn('"assets/"', audit)
+
     def test_provider_diagnostics_redact_signed_urls_and_credentials(self) -> None:
         import ingest
 

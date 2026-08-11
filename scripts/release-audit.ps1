@@ -5,7 +5,7 @@ $Skip = @(".git", ".runtime", ".venv", "bin", "inbox", "archives", "work", "mark
 $TextExtensions = @(
     ".py", ".ps1", ".psm1", ".psd1", ".sh", ".cmd", ".bat", ".md", ".yaml",
     ".yml", ".json", ".cff", ".toml", ".txt", ".example", ".ini", ".xml",
-    ".html", ".css", ".js", ".ts", ".csv", ""
+    ".html", ".css", ".js", ".ts", ".csv", ".svg", ""
 )
 $SensitiveExtensions = @(
     ".pem", ".key", ".p12", ".pfx", ".token", ".sqlite", ".sqlite3", ".db",
@@ -15,6 +15,10 @@ $DisallowedArtifacts = @(
     ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".mp3", ".mp4",
     ".mkv", ".mov", ".avi", ".wav", ".webm", ".zip", ".7z", ".rar", ".tar",
     ".gz", ".tgz", ".png", ".jpg", ".jpeg", ".gif", ".webp"
+)
+$AllowedPublicArtifacts = @(
+    "assets/pipeline.png",
+    "assets/social-preview.png"
 )
 $AllowedActions = @("actions/checkout", "actions/setup-python", "astral-sh/setup-uv")
 
@@ -78,8 +82,10 @@ foreach ($File in $Files) {
 }
 
 $Unexpected = $Files | Where-Object {
-    $_.Name -match '^(state\.db|\.env)$' -or $_.Extension.ToLowerInvariant() -in
-        $DisallowedArtifacts
+    $Relative = $_.FullName.Substring($Root.Length + 1).Replace('\', '/')
+    $IsPrivateArtifact = $_.Name -match '^(state\.db|\.env)$' -or
+        $_.Extension.ToLowerInvariant() -in $DisallowedArtifacts
+    $IsPrivateArtifact -and $Relative -notin $AllowedPublicArtifacts
 }
 foreach ($File in $Unexpected) {
     $Failures.Add("private/generated artifact present: $($File.FullName.Substring($Root.Length + 1))")
@@ -229,7 +235,7 @@ if (Test-Path (Join-Path $Root ".git")) {
                 $Extension -in $SensitiveExtensions -or $Name -match '\.secrets\.') {
                 $Failures.Add("sensitive path in reachable history $($Commit.Substring(0, 12)): $Normalized")
             }
-            if ($Extension -in $DisallowedArtifacts) {
+            if ($Extension -in $DisallowedArtifacts -and $Normalized -notin $AllowedPublicArtifacts) {
                 $Failures.Add("private/generated artifact in reachable history $($Commit.Substring(0, 12)): $Normalized")
             }
             if ($Extension -notin $TextExtensions) { continue }
