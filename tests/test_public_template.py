@@ -84,6 +84,28 @@ class PublicTemplateTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 2, (arguments, completed.stderr))
             self.assertFalse(state_db.exists())
 
+    def test_every_mutating_cli_mode_uses_the_shared_mutation_lock(self) -> None:
+        """Maintenance commands must not race the long-running ingest worker."""
+        source = (ROOT / "ingest.py").read_text("utf-8")
+        tree = ast.parse(source)
+        main = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "main"
+        )
+        rendered = ast.unparse(main)
+        self.assertGreaterEqual(rendered.count("single_instance('.mutation.lock')"), 10)
+        for operation_lock in (
+            ".manual-deletion-detect.lock",
+            ".manual-deletion-sync.lock",
+            ".state-repair.lock",
+            ".content-migration.lock",
+            ".source-recovery.lock",
+            ".ingest.lock",
+            ".classification.lock",
+        ):
+            self.assertIn(operation_lock, rendered)
+
     def test_safe_destructive_defaults(self) -> None:
         config = yaml.safe_load((ROOT / "config.example.yaml").read_text("utf-8"))
         self.assertFalse(config["classification"]["delete_videos"])
@@ -739,6 +761,12 @@ class PublicTemplateTests(unittest.TestCase):
         stop = (ROOT / "scripts" / "stop.ps1").read_text("utf-8")
         self.assertIn("wsl-distro.txt", root_start)
         self.assertIn("wsl-distro.txt", stop)
+        self.assertIn("Get-Content -Raw -Encoding UTF8 -LiteralPath $DistroFile", root_start)
+        self.assertIn("Get-Content -Raw -Encoding UTF8 -LiteralPath $DistroFile", stop)
+        wrong_distro_check = root_start.index("if ($WrongDistroKeepAlive.Count)")
+        distro_persist = root_start.index("[IO.File]::WriteAllText($DistroFile")
+        self.assertLess(wrong_distro_check, distro_persist)
+        self.assertNotIn("$PreviousKeepAlive.CommandLine", root_start)
 
     def test_password_hashing_enforces_bcrypt_limit_and_clears_bytes(self) -> None:
         script = (ROOT / "mcp-public" / "set-password.ps1").read_text("utf-8")

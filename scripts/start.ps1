@@ -157,16 +157,7 @@ if (-not $StartMutexOwned) {
 }
 $KeepAlivePid = Join-Path $Runtime "wsl-keepalive.pid"
 $DistroFile = Join-Path $Runtime "wsl-distro.txt"
-$PreviousDistro = if (Test-Path $DistroFile) { (Get-Content -Raw -LiteralPath $DistroFile).Trim() } else { "" }
-if ($PreviousDistro -and -not $PreviousDistro.Equals($WslDistro, [StringComparison]::OrdinalIgnoreCase) -and
-    (Test-Path $KeepAlivePid)) {
-    try { $PreviousPid = [int](Get-Content -Raw -LiteralPath $KeepAlivePid) } catch { $PreviousPid = 0 }
-    $PreviousKeepAlive = if ($PreviousPid) { Get-CimInstance Win32_Process -Filter "ProcessId=$PreviousPid" -ErrorAction SilentlyContinue } else { $null }
-    if ($PreviousKeepAlive -and $PreviousKeepAlive.CommandLine -match '(?i)sleep\s+infinity') {
-        throw "This template is still keeping WSL distro '$PreviousDistro' alive. Stop it before switching to '$WslDistro'."
-    }
-}
-[IO.File]::WriteAllText($DistroFile, $WslDistro, [Text.UTF8Encoding]::new($false))
+$PreviousDistro = if (Test-Path $DistroFile) { (Get-Content -Raw -Encoding UTF8 -LiteralPath $DistroFile).Trim() } else { "" }
 $DistroPattern = [regex]::Escape($WslDistro)
 $KeepAliveIdentityPattern = '(?i)QUESTION_BANK_KEEPALIVE=' + [regex]::Escape($KeepAliveToken) + '.*sleep\s+infinity'
 $KeepAlivePattern = '(?i)-d\s+"?' + $DistroPattern + '"?.*' + $KeepAliveIdentityPattern
@@ -197,8 +188,13 @@ try {
         $_.CommandLine -notmatch $KeepAlivePattern
     })
     if ($WrongDistroKeepAlive.Count) {
-        throw "This template already owns a WSL keepalive for another distro. Run scripts/stop.ps1 -StopWeKnora before switching distros."
+        $RecordedDistro = if ($PreviousDistro) { $PreviousDistro } else { "another distro" }
+        throw "This template is still keeping WSL distro '$RecordedDistro' alive. Run scripts/stop.ps1 -StopWeKnora before switching distros."
     }
+    # Persist the requested distro only after proving that this template does
+    # not still own a keepalive for a different distro.  A failed switch must
+    # not corrupt the stop script's last-known distro.
+    [IO.File]::WriteAllText($DistroFile, $WslDistro, [Text.UTF8Encoding]::new($false))
     $KeepAlive = Get-ManagedProcess $KeepAlivePid $WslExe $KeepAlivePattern
     if (-not $KeepAlive) {
         $KeepAliveProcess = Start-Process -FilePath $WslExe `
