@@ -4,7 +4,7 @@ title: "Question Bank Template"
 type: software
 authors:
   - alias: "xydadada"
-version: 0.1.12
+version: 0.1.13
 date-released: 2026-08-11
 license: MIT
 repository-code: "https://github.com/xydadada/question-bank-template"

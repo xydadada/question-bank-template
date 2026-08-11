@@ -42,6 +42,36 @@ class PublicTemplateTests(unittest.TestCase):
     def test_ingest_parses(self) -> None:
         ast.parse((ROOT / "ingest.py").read_text("utf-8"))
 
+    def test_provider_diagnostics_redact_signed_urls_and_credentials(self) -> None:
+        import ingest
+
+        detail = ingest.safe_provider_diagnostic(
+            {
+                "code": 500,
+                "message": "temporary failure at https://status.example/signed",
+                "data": {
+                    "full_zip_url": "https://download.example/file?signature=live",
+                    "nested": [
+                        {
+                            "api_key": "live-secret",
+                            "source": "https://upload.example/signed",
+                        }
+                    ],
+                },
+            }
+        )
+        self.assertIn("temporary failure", detail)
+        self.assertNotIn("download.example", detail)
+        self.assertNotIn("upload.example", detail)
+        self.assertNotIn("status.example", detail)
+        self.assertNotIn("live-secret", detail)
+        self.assertNotIn(
+            "inline-secret",
+            ingest.safe_provider_diagnostic("request failed: token=inline-secret"),
+        )
+        source = (ROOT / "ingest.py").read_text("utf-8")
+        self.assertGreaterEqual(source.count("safe_provider_diagnostic("), 6)
+
     def test_cli_help_starts_without_runtime_state(self) -> None:
         """The documented entry point must load before any private setup exists."""
         state_db = ROOT / "state.db"
@@ -83,6 +113,45 @@ class PublicTemplateTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 2, (arguments, completed.stderr))
             self.assertFalse(state_db.exists())
+
+    def test_supervisor_propagates_explicit_config_to_worker(self) -> None:
+        """A restarted worker must use the same explicit configuration."""
+        import ingest
+
+        worker = mock.Mock()
+        worker.poll.return_value = 0
+        worker.wait.return_value = 0
+        guard = mock.MagicMock()
+        guard.__enter__.return_value = None
+        guard.__exit__.return_value = False
+        with (
+            mock.patch.object(ingest, "single_instance", return_value=guard),
+            mock.patch.object(
+                ingest.subprocess, "Popen", return_value=worker
+            ) as popen,
+            mock.patch.object(
+                ingest, "supervisor_progress_stamp", return_value=time.time()
+            ),
+        ):
+            ingest.supervise_ingest({}, "C:/custom/question-bank.yaml")
+        command = popen.call_args.args[0]
+        self.assertEqual(command[-3:], ["--worker", "--config", "C:/custom/question-bank.yaml"])
+
+    def test_supervisor_observes_the_logs_written_by_start_script(self) -> None:
+        """Printed progress must reset the stall watchdog even before DB writes."""
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log_dir = root / ".runtime" / "logs"
+            log_dir.mkdir(parents=True)
+            stdout_log = log_dir / "ingest.stdout.log"
+            stdout_log.write_text("active progress\n", encoding="utf-8")
+            expected = time.time() - 5
+            os.utime(stdout_log, (expected, expected))
+            with mock.patch.object(ingest, "ROOT", root):
+                observed = ingest.supervisor_progress_stamp()
+        self.assertAlmostEqual(observed, expected, delta=1.0)
 
     def test_every_mutating_cli_mode_uses_the_shared_mutation_lock(self) -> None:
         """Maintenance commands must not race the long-running ingest worker."""
@@ -573,6 +642,25 @@ class PublicTemplateTests(unittest.TestCase):
         source = (ROOT / "ingest.py").read_text("utf-8")
         self.assertIn("压缩包已展开并永久删除原包", source)
         self.assertIn("压缩包已展开，原包已移至archives保留", source)
+
+    def test_archive_extraction_emits_supervisor_visible_heartbeats(self) -> None:
+        import ingest
+
+        process = mock.Mock()
+        process.returncode = 0
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(["7z"], 300),
+            ("complete", ""),
+        ]
+        with (
+            mock.patch.object(ingest.subprocess, "Popen", return_value=process),
+            mock.patch.object(ingest, "print") as progress,
+        ):
+            result = ingest.run_archive_extractor(["7z", "x", "sample.zip"])
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "complete")
+        self.assertEqual(process.communicate.call_count, 2)
+        progress.assert_called_once()
 
     def test_ambiguous_typescript_suffix_is_not_treated_as_video(self) -> None:
         config = yaml.safe_load((ROOT / "config.example.yaml").read_text("utf-8"))

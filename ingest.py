@@ -88,6 +88,14 @@ MAX_MINERU_RESULT_ZIP_BYTES = 2 * 1024**3
 MAX_MINERU_RESULT_FILES = 100_000
 MAX_MINERU_RESULT_EXPANDED_BYTES = 20 * 1024**3
 MAX_ARCHIVE_LIST_BYTES = 64 * 1024**2
+PROVIDER_SECRET_FIELD = re.compile(
+    r"(?:url|uri|token|api.?key|authorization|credential|signature|secret)",
+    re.IGNORECASE,
+)
+PROVIDER_INLINE_SECRET = re.compile(
+    r"(?i)\b(?:token|api[_-]?key|authorization|credential|signature|secret)"
+    r"\s*[:=]\s*[^\s,;\"'<>]+"
+)
 
 
 def print(*args, **kwargs) -> None:
@@ -95,6 +103,40 @@ def print(*args, **kwargs) -> None:
     with PRINT_LOCK:
         kwargs.setdefault("flush", True)
         builtins.print(*args, **kwargs)
+
+
+def safe_provider_diagnostic(value: object) -> str:
+    """Return provider error context without persisting credentials or signed URLs."""
+
+    def scrub(item: object, depth: int = 0) -> object:
+        if depth > 8:
+            return "<truncated>"
+        if isinstance(item, dict):
+            return {
+                str(key): (
+                    "<redacted>"
+                    if PROVIDER_SECRET_FIELD.search(str(key))
+                    else scrub(child, depth + 1)
+                )
+                for key, child in item.items()
+            }
+        if isinstance(item, (list, tuple)):
+            return [scrub(child, depth + 1) for child in item[:50]]
+        if isinstance(item, str):
+            without_urls = re.sub(
+                r"(?i)https?://[^\s\"'<>]+",
+                "<redacted-url>",
+                item,
+            )
+            return PROVIDER_INLINE_SECRET.sub("<redacted-secret>", without_urls)
+        if isinstance(item, (int, float, bool)) or item is None:
+            return item
+        return f"<{type(item).__name__}>"
+
+    try:
+        return json.dumps(scrub(value), ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return f"<{type(value).__name__}>"
 
 
 def new_pooled_session(pool_size: int) -> requests.Session:
@@ -1224,6 +1266,8 @@ def supervisor_progress_stamp() -> float:
     """Return the newest durable progress timestamp without writing state."""
     candidates = [
         ROOT / "ingest.log",
+        ROOT / ".runtime" / "logs" / "ingest.stdout.log",
+        ROOT / ".runtime" / "logs" / "ingest.stderr.log",
         ROOT / "state.db",
         ROOT / "state.db-wal",
     ]
@@ -1307,7 +1351,7 @@ def stop_supervised_process_tree(process: subprocess.Popen) -> None:
         process.wait(timeout=10)
 
 
-def supervise_ingest(cfg: dict) -> None:
+def supervise_ingest(cfg: dict, config_path: str | None = None) -> None:
     """Run ingest as a child and recover only from proven idle stalls."""
     resource = cfg.get("resource_control", {})
     stall_seconds = max(
@@ -1325,8 +1369,16 @@ def supervise_ingest(cfg: dict) -> None:
     restart_times: deque[float] = deque()
     with single_instance(".supervisor.lock"):
         while True:
+            worker_command = [
+                sys.executable,
+                "-u",
+                str(Path(__file__).resolve()),
+                "--worker",
+            ]
+            if config_path:
+                worker_command.extend(["--config", config_path])
             worker = subprocess.Popen(
-                [sys.executable, "-u", str(Path(__file__).resolve()), "--worker"],
+                worker_command,
                 cwd=ROOT,
             )
             last_progress = max(time.time(), supervisor_progress_stamp())
@@ -1767,6 +1819,46 @@ def unique_unpack_target(archive: Path, suffix: str, digest: str) -> Path:
     return candidate
 
 
+def run_archive_extractor(
+    command: list[str],
+    *,
+    timeout_seconds: int = 7200,
+    heartbeat_seconds: int = 300,
+) -> subprocess.CompletedProcess[str]:
+    """Run 7-Zip while emitting sparse progress for the stall supervisor."""
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            process.kill()
+            stdout, stderr = process.communicate()
+            detail = (stderr or stdout or "").strip()[-500:]
+            raise RuntimeError(
+                f"压缩包解压超过{timeout_seconds}秒，已停止7-Zip: {detail}"
+            )
+        try:
+            stdout, stderr = process.communicate(
+                timeout=min(float(heartbeat_seconds), remaining)
+            )
+            return subprocess.CompletedProcess(
+                command,
+                int(process.returncode or 0),
+                stdout,
+                stderr,
+            )
+        except subprocess.TimeoutExpired:
+            print("压缩包仍在展开，7-Zip进程保持运行", flush=True)
+
+
 def extract_archive(
     archive: Path,
     depth: int,
@@ -1797,7 +1889,7 @@ def extract_archive(
     clean_job(stage, work_root)
     target = unique_unpack_target(archive, suffix, digest)
     try:
-        result = subprocess.run(
+        result = run_archive_extractor(
             [
                 str(cfg["archive_executable"]),
                 "x",
@@ -1807,13 +1899,7 @@ def extract_archive(
                 "-sccUTF-8",
                 f"-o{stage}",
                 str(archive),
-            ],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=7200,
+            ]
         )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()[-500:]
@@ -2139,7 +2225,9 @@ def mineru_create_batch(
             continue
         response.raise_for_status()
         if not result or result.get("code") != 0:
-            raise RuntimeError(f"MinerU提交失败: {result}")
+            raise RuntimeError(
+                "MinerU提交失败: " + safe_provider_diagnostic(result)
+            )
         data = result.get("data") or {}
         batch_id = str(data.get("batch_id") or "").strip()
         urls = data.get("file_urls")
@@ -2235,17 +2323,19 @@ def mineru_wait(
         r.raise_for_status()
         result = r.json()
         if result.get("code") != 0:
-            raise RuntimeError(f"MinerU查询失败: {result}")
+            raise RuntimeError(
+                "MinerU查询失败: " + safe_provider_diagnostic(result)
+            )
         items = result["data"].get("extract_result", [])
         failed = [item for item in items if item.get("state") == "failed"]
         if failed:
-            details = json.dumps(failed, ensure_ascii=False)
+            details = safe_provider_diagnostic(failed)
             if (
                 "pages exceeds limit" in details.casefold()
                 or "页数" in details and "超过" in details
             ):
                 raise MinerURepartitionRequired(details)
-            raise RuntimeError(f"MinerU解析失败: {failed}")
+            raise RuntimeError(f"MinerU解析失败: {details}")
         completed.extend(
             item for item in items if item.get("state") == "done"
         )
@@ -2434,7 +2524,10 @@ def download_results(
             else by_name.get(item.get("file_name"), [])
         )
         if len(matches) != 1:
-            raise RuntimeError(f"MinerU结果无法唯一对应源分卷: {item}")
+            raise RuntimeError(
+                "MinerU结果无法唯一对应源分卷: "
+                + safe_provider_diagnostic(item)
+            )
         part = matches[0]
         identity = part_data_id(part)
         if identity in seen_parts:
@@ -2472,7 +2565,10 @@ def download_recovered_results(
         file_name = str(item.get("file_name") or original_source.name)
         result_url = str(item.get("full_zip_url") or "").strip()
         if not result_url:
-            raise RuntimeError(f"MinerU恢复结果缺少下载地址: {item}")
+            raise RuntimeError(
+                "MinerU恢复结果缺少下载地址: "
+                + safe_provider_diagnostic(item)
+            )
         identity = f"data_id:{data_id}" if data_id else f"file_name:{file_name}"
         if identity in seen_identities:
             raise RuntimeError(f"MinerU恢复结果包含重复任务: {identity}")
@@ -12575,7 +12671,7 @@ def main() -> None:
         parser.error("--migration-group requires --migrate-content-structure")
     cfg = load_settings(args.config)
     if args.supervise and not args.worker:
-        supervise_ingest(cfg)
+        supervise_ingest(cfg, args.config)
         return
     db = db_open()
     reconcile_appledouble_history(db)
