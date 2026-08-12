@@ -7,19 +7,29 @@
 [![License](https://img.shields.io/github/license/xydadada/question-bank-template)](LICENSE)
 [![Use this template](https://img.shields.io/badge/use_this-template-2ea44f)](https://github.com/new?template_owner=xydadada&template_name=question-bank-template)
 
-This repository is not another RAG framework. It connects the less glamorous parts of
-building a searchable question bank: MinerU parses documents, MiMo describes important
-figures, WeKnora indexes parent records, child records, and full Markdown, and the official
-WeKnora MCP can expose retrieval to ChatGPT.
+I started this project because the slow part of building a question bank was rarely the
+upload itself. The work around it kept growing: sorting mixed files, waiting for cloud
+parsing, restoring information from figures, pairing separate questions and solutions,
+keeping enough state to resume, and checking that each index could retrieve its own data.
 
-The template targets Windows 11 with WSL2. It contains code and blank configuration only.
-It does not ship the author's documents, API keys, accounts, domain names, knowledge base
-IDs, or runtime database. It is not a hosted service; each user owns the documents and the
-service accounts used to process them.
+This template connects those steps. MinerU parses documents, MiMo describes important
+figures, and WeKnora stores parent records, child records, and full Markdown. The official
+WeKnora MCP can expose those three retrieval layers to ChatGPT when needed. This is an
+orchestration project, not a new RAG framework or a hosted service.
+
+The maintained setup is Windows 11 with WSL2, Docker Desktop, and Ollama on Windows. The
+repository contains code, blank configuration, and synthetic examples. It does not ship
+the maintainer's documents, keys, accounts, domains, knowledge-base IDs, or runtime
+database. Each user supplies their own documents and service accounts.
+
+> **Project status:** this is an alpha template under active development. Automated tests
+> cover local state, safety interlocks, scripts, and failure recovery. They cannot validate
+> your MinerU, MiMo, WeKnora, or ChatGPT account. Start with a disposable file and leave all
+> permanent-deletion settings disabled.
 
 ![Pipeline from source files to three retrieval layers](assets/pipeline.png)
 
-## What the pipeline does
+## What it does
 
 ```text
 files, folders, or archives placed in inbox
@@ -51,6 +61,11 @@ The project does not replace MinerU, WeKnora, Ollama, OAuth, a vector database, 
 Neo4j. `ingest.py` moves data between those existing components, records resumable state,
 and handles failure recovery.
 
+It is also deliberately narrow. It is not a hosted web application, does not provide a
+question-bank corpus, and does not train models. There is no maintained installer for macOS
+or native Linux. If you only need to import a few ordinary PDFs, using WeKnora directly is
+probably simpler.
+
 ## See the output first
 
 The [minimal structure example](examples/minimal-physics/README.md) shows how a separate
@@ -60,7 +75,7 @@ question bank.
 
 ## Safe defaults
 
-The example configuration favors preservation over automation:
+The default configuration preserves files rather than guessing what can be removed:
 
 - Git ignores `.env`, `config.local.yaml`, documents, generated Markdown, logs, and
   `state.db`.
@@ -109,6 +124,9 @@ inside WSL can work, but you must configure container access to Ollama yourself.
 assume that `host.docker.internal:11434` is available in that setup.
 
 ## Shortest installation path
+
+`scripts/doctor.ps1` checks whether an existing clone is ready for retrieval or ingestion.
+For a first installation, start with the bootstrap script:
 
 ```powershell
 git clone https://github.com/xydadada/question-bank-template.git
