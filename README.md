@@ -7,17 +7,25 @@
 [![License](https://img.shields.io/github/license/xydadada/question-bank-template)](LICENSE)
 [![Use this template](https://img.shields.io/badge/use_this-template-2ea44f)](https://github.com/new?template_owner=xydadada&template_name=question-bank-template)
 
-这不是另一套 RAG 框架。这个仓库把题库入库前后的杂活接成一条可恢复的流水线：
-MinerU 负责解析，MiMo 补题图说明，WeKnora 保存并检索父块、子块和原文，官方
-WeKnora MCP 可以把只读检索接到 ChatGPT。
+我写这个项目，是因为真正费时间的往往不是把文件拖进知识库，而是拖进去之前和之后
+的工作：拆分混杂资料、等待云端解析、补回题图信息、配对题目与答案、保留可恢复状态，
+最后还要确认每一层确实能搜到。
 
-模板面向 Windows 11 和 WSL2。仓库里只有代码与空配置，不附带作者的题库、密钥、
-账号、域名、知识库 ID 或运行数据库。它也不是托管服务。资料和服务账号始终由使用者
-自己管理。
+这套模板把这些步骤接在一起。MinerU 解析文档，MiMo 描述重要题图，WeKnora 保存并
+检索父块、子块和原文。需要时，官方 WeKnora MCP 可以再把三层检索接到 ChatGPT。
+它不是新的 RAG 框架，也不是托管服务。
+
+目前维护和验证的环境是 Windows 11、WSL2、Docker Desktop 和 Windows 版 Ollama。
+仓库只提供代码、空配置和合成示例，不附带维护者的题库、密钥、账号、域名、知识库 ID
+或运行数据库。下载者使用自己的资料和服务账号。
+
+> **项目状态：** 这是仍在演进的 alpha 模板。自动测试覆盖本地状态、安全门、脚本和
+> 失败恢复，但无法替你验证自己的 MinerU、MiMo、WeKnora 或 ChatGPT 账号。第一次请
+> 使用可丢弃的小文件，并保持所有永久删除开关关闭。
 
 ![从源文件到三层检索的处理流程](assets/pipeline.png)
 
-## 处理流程
+## 它实际做什么
 
 ```text
 inbox 中的文件、文件夹或压缩包
@@ -45,6 +53,10 @@ inbox 中的文件、文件夹或压缩包
 它没有替换 MinerU、WeKnora、Ollama、OAuth、向量数据库、Wiki 或 Neo4j。
 `ingest.py` 只负责在这些现成组件之间传递文件、记录状态并处理失败恢复。
 
+不适合的情况也很明确：它不是网页服务，不提供现成题库，不负责训练模型，目前也没有
+为 macOS 或原生 Linux 写安装入口。只需要导入几份普通 PDF 时，直接使用 WeKnora 会
+更省事。
+
 ## 先看输出
 
 不准备立即安装时，可以先看[最小结构示例](examples/minimal-physics/README.md)。示例用
@@ -53,7 +65,7 @@ inbox 中的文件、文件夹或压缩包
 
 ## 安全默认值
 
-模板默认采用保守设置：
+默认配置宁可多保留文件，也不替使用者猜测：
 
 - `.env`、`config.local.yaml`、题库、Markdown、日志和 `state.db` 都被 Git 忽略。
 - 脚本不会创建开机启动项，也不会修改 Windows 计划任务。
@@ -96,6 +108,9 @@ QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC=I_UNDERSTAND
 `host.docker.internal:11434` 一定可达。
 
 ## 最短安装路径
+
+先运行 `scripts/doctor.ps1` 可以检查当前克隆是否已经具备检索或处理条件。首次安装仍
+从引导脚本开始：
 
 ```powershell
 git clone https://github.com/xydadada/question-bank-template.git

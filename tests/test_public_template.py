@@ -42,6 +42,51 @@ class PublicTemplateTests(unittest.TestCase):
     def test_ingest_parses(self) -> None:
         ast.parse((ROOT / "ingest.py").read_text("utf-8"))
 
+    def test_invalid_config_reports_missing_sections_cleanly(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "config.yaml"
+            config.write_text("folders: {}\n", encoding="utf-8")
+            with mock.patch.object(ingest, "ROOT", root):
+                with self.assertRaisesRegex(
+                    RuntimeError, "配置文件缺少必要区段"
+                ):
+                    ingest.load_settings(config)
+
+    def test_invalid_config_rejects_non_mapping_sections(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "config.yaml"
+            config.write_text(
+                "folders: []\n"
+                "classification: {}\n"
+                "document_classification: {}\n"
+                "mineru: {}\n"
+                "ollama: {}\n"
+                "pairing: {}\n"
+                "weknora: {}\n"
+                "resource_control: {}\n"
+                "cleanup: {}\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(ingest, "ROOT", root):
+                with self.assertRaisesRegex(
+                    RuntimeError, "配置区段必须是YAML映射: folders"
+                ):
+                    ingest.load_settings(config)
+
+    def test_example_config_omits_legacy_inert_options(self) -> None:
+        config = yaml.safe_load(
+            (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("poll_seconds", config["mineru"])
+        self.assertNotIn("timeout_seconds", config["mineru"])
+        self.assertNotIn("ocr_version", config["ollama"])
+
     def test_public_showcase_assets_and_demo(self) -> None:
         preview = ROOT / "assets" / "social-preview.png"
         pipeline = ROOT / "assets" / "pipeline.svg"
@@ -566,6 +611,253 @@ class PublicTemplateTests(unittest.TestCase):
                     ).fetchone()[0],
                     0,
                 )
+            finally:
+                database.close()
+
+    def test_classification_migration_builds_and_verifies_all_three_layers(self) -> None:
+        """Historical classification migration must not leave the raw index stale."""
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            markdown_root = root / "markdown"
+            scratch = root / "work"
+            destination = markdown_root / "试卷" / "未知机构" / "力学"
+            markdown_root.mkdir()
+            source = root / "source.pdf"
+            source.write_bytes(b"source")
+            digest = ingest.sha256(source)
+            old_markdown = markdown_root / "old.md"
+            old_markdown.write_text(
+                "# 第1题\n资料：Example\n**题目**\nBody\n"
+                "**答案**\nAnswer\n**解析**\nReason\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(ingest, "ROOT", root):
+                database = ingest.db_open()
+            database.execute(
+                """INSERT INTO files(
+                    sha256,source_path,state,markdown_path,error,updated_at,
+                    metrics_json
+                ) VALUES(?,?,?,?,?,?,?)""",
+                (
+                    digest,
+                    str(source),
+                    "completed",
+                    str(old_markdown),
+                    "",
+                    1,
+                    "{}",
+                ),
+            )
+            database.execute(
+                """INSERT INTO groups(
+                    group_id,group_name,state,markdown_path,parent_doc_id,
+                    child_doc_id,raw_doc_id,error,updated_at,classification_json
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "group-1",
+                    "Example",
+                    "completed",
+                    str(old_markdown),
+                    "old-parent",
+                    "old-child",
+                    "old-raw",
+                    "",
+                    1,
+                    "{}",
+                ),
+            )
+            database.execute(
+                "INSERT INTO group_files(group_id,sha256,source_path) VALUES(?,?,?)",
+                ("group-1", digest, str(source)),
+            )
+            database.commit()
+            classification = ingest.DocumentClassification(
+                "试卷",
+                "未知机构",
+                "力学",
+                ("力学",),
+                "rule",
+                0.99,
+                ("test evidence",),
+                1,
+            )
+            config = {
+                "folders": {"markdown": markdown_root, "work": scratch},
+                "document_classification": {
+                    "taxonomy": {"version": 1},
+                    "version": 1,
+                    "delete_other_source_after_markdown": False,
+                },
+                "pairing": {"child_chars": 1200},
+                "cleanup": {
+                    "delete_temporary_files": False,
+                    "permanently_delete_source_after_search": False,
+                },
+                "weknora": {
+                    "parent_knowledge_base": "parent-kb",
+                    "child_knowledge_base": "child-kb",
+                    "raw_knowledge_base": "raw-kb",
+                },
+            }
+
+            def uploaded_id(*args, **kwargs):
+                layer = args[4]
+                return f"new-{layer}"
+
+            try:
+                with (
+                    mock.patch.object(
+                        ingest, "classify_group", return_value=classification
+                    ),
+                    mock.patch.object(
+                        ingest,
+                        "classification_directory",
+                        return_value=destination,
+                    ),
+                    mock.patch.object(
+                        ingest, "weknora_find_existing", return_value=""
+                    ),
+                    mock.patch.object(
+                        ingest, "weknora_upload", side_effect=uploaded_id
+                    ) as upload,
+                    mock.patch.object(ingest, "verify_two_level_indexes") as verify,
+                    mock.patch.object(
+                        ingest, "cleanup_verified_sources", return_value=[]
+                    ),
+                ):
+                    ingest.migrate_classified_markdown(
+                        config,
+                        database,
+                        dry_run=False,
+                        delete_old_indexes=False,
+                    )
+                group = database.execute(
+                    "SELECT * FROM groups WHERE group_id='group-1'"
+                ).fetchone()
+                self.assertEqual(group["state"], "completed")
+                self.assertEqual(group["parent_doc_id"], "new-parent")
+                self.assertEqual(group["child_doc_id"], "new-child")
+                self.assertEqual(group["raw_doc_id"], "new-raw")
+                self.assertTrue(Path(group["raw_path"]).is_file())
+                self.assertEqual(
+                    ingest.markdown_frontmatter(Path(group["raw_path"]))[
+                        "index_layer"
+                    ],
+                    "raw",
+                )
+                self.assertEqual(upload.call_count, 3)
+                self.assertEqual(verify.call_args.kwargs["raw_doc_id"], "new-raw")
+                self.assertEqual(
+                    verify.call_args.kwargs["raw_path"], Path(group["raw_path"])
+                )
+            finally:
+                database.close()
+
+    def test_cleanup_resume_rebuilds_child_layer_before_verification(self) -> None:
+        """A cleanup retry must not verify the child document with parent bytes."""
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inbox = root / "inbox"
+            work = root / "work"
+            markdown = root / "markdown"
+            failed = root / "failed"
+            for folder in (inbox, work, markdown, failed):
+                folder.mkdir()
+            source = inbox / "source.md"
+            source.write_text("source", encoding="utf-8")
+            digest = ingest.sha256(source)
+            parent = markdown / "parent.md"
+            parent.write_text(
+                "---\nindex_layer: parent\n---\n\n"
+                "# 第1题\n资料：Example\n**题目**\nBody\n"
+                "**答案**\nAnswer\n**解析**\nReason\n",
+                encoding="utf-8",
+            )
+            raw = markdown / "raw.md"
+            raw.write_text(
+                "---\nindex_layer: raw\n---\n\nRaw body\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(ingest, "ROOT", root):
+                database = ingest.db_open()
+            database.execute(
+                """INSERT INTO files(
+                    sha256,source_path,state,markdown_path,error,updated_at,
+                    metrics_json
+                ) VALUES(?,?,?,?,?,?,?)""",
+                (
+                    digest,
+                    str(source),
+                    "cleanup_pending",
+                    str(parent),
+                    "",
+                    1,
+                    "{}",
+                ),
+            )
+            database.execute(
+                """INSERT INTO groups(
+                    group_id,group_name,state,markdown_path,parent_doc_id,
+                    child_doc_id,raw_path,raw_doc_id,error,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "group-1",
+                    "Example",
+                    "cleanup_pending",
+                    str(parent),
+                    "parent-doc",
+                    "child-doc",
+                    str(raw),
+                    "raw-doc",
+                    "",
+                    1,
+                ),
+            )
+            database.execute(
+                "INSERT INTO group_files(group_id,sha256,source_path) VALUES(?,?,?)",
+                ("group-1", digest, str(source)),
+            )
+            database.commit()
+            config = {
+                "folders": {
+                    "inbox": inbox,
+                    "work": work,
+                    "markdown": markdown,
+                    "failed": failed,
+                },
+                "pairing": {"child_chars": 1200},
+                "cleanup": {
+                    "delete_temporary_files": True,
+                    "permanently_delete_source_after_search": False,
+                },
+                "weknora": {"raw_knowledge_base": "raw-kb"},
+                "document_classification": {
+                    "taxonomy": {"version": 1},
+                    "version": 1,
+                },
+            }
+            try:
+                with (
+                    mock.patch.object(ingest, "verify_two_level_indexes") as verify,
+                    mock.patch.object(
+                        ingest, "cleanup_verified_sources", return_value=[]
+                    ),
+                ):
+                    ingest.process_group(
+                        "group-1",
+                        "Example",
+                        [source],
+                        config,
+                        database,
+                    )
+                child_path = verify.call_args.args[1]
+                self.assertNotEqual(child_path, parent)
+                self.assertIn(".children.md", child_path.name)
+                self.assertFalse(child_path.exists())
             finally:
                 database.close()
 

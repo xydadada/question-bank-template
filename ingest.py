@@ -925,6 +925,31 @@ def load_settings(config_path: str | Path | None = None) -> dict:
         )
     os.environ["QUESTION_BANK_CONFIG"] = str(selected)
     cfg = yaml.safe_load(selected.read_text("utf-8"))
+    if not isinstance(cfg, dict):
+        raise RuntimeError(f"配置文件顶层必须是YAML映射: {selected}")
+    required_sections = {
+        "folders",
+        "classification",
+        "document_classification",
+        "mineru",
+        "ollama",
+        "pairing",
+        "weknora",
+        "resource_control",
+        "cleanup",
+    }
+    missing_sections = sorted(required_sections - set(cfg))
+    if missing_sections:
+        raise RuntimeError(
+            "配置文件缺少必要区段: " + ", ".join(missing_sections)
+        )
+    invalid_sections = sorted(
+        name for name in required_sections if not isinstance(cfg[name], dict)
+    )
+    if invalid_sections:
+        raise RuntimeError(
+            "配置区段必须是YAML映射: " + ", ".join(invalid_sections)
+        )
     weknora_cfg = cfg.get("weknora", {})
     NEO4J_RUNTIME_CONFIG = {
         "wsl_distro": str(weknora_cfg.get("wsl_distro", "Ubuntu")),
@@ -973,9 +998,10 @@ def load_settings(config_path: str | Path | None = None) -> dict:
     taxonomy_path = Path(cfg["document_classification"]["taxonomy_file"])
     if not taxonomy_path.is_absolute():
         taxonomy_path = (ROOT / taxonomy_path).resolve()
-    cfg["document_classification"]["taxonomy"] = yaml.safe_load(
-        taxonomy_path.read_text("utf-8")
-    )
+    taxonomy = yaml.safe_load(taxonomy_path.read_text("utf-8"))
+    if not isinstance(taxonomy, dict):
+        raise RuntimeError(f"分类规则文件顶层必须是YAML映射: {taxonomy_path}")
+    cfg["document_classification"]["taxonomy"] = taxonomy
     for key, value in cfg["folders"].items():
         cfg["folders"][key] = (ROOT / value).resolve()
         cfg["folders"][key].mkdir(parents=True, exist_ok=True)
@@ -8371,21 +8397,30 @@ def process_group(
     ):
         canonical = Path(group_row["markdown_path"])
         if canonical.is_file():
-            verify_two_level_indexes(
+            resume_child = child_index_from_parent(
                 canonical,
-                canonical,
-                sources[0],
-                cfg["weknora"],
-                group_row["parent_doc_id"],
-                group_row["child_doc_id"],
-                full_check=False,
-                raw_path=(
-                    Path(group_row["raw_path"])
-                    if group_row["raw_path"]
-                    else None
-                ),
-                raw_doc_id=str(group_row["raw_doc_id"] or ""),
+                cfg["folders"]["work"],
+                int(cfg["pairing"]["child_chars"]),
             )
+            try:
+                verify_two_level_indexes(
+                    canonical,
+                    resume_child,
+                    sources[0],
+                    cfg["weknora"],
+                    group_row["parent_doc_id"],
+                    group_row["child_doc_id"],
+                    full_check=False,
+                    raw_path=(
+                        Path(group_row["raw_path"])
+                        if group_row["raw_path"]
+                        else None
+                    ),
+                    raw_doc_id=str(group_row["raw_doc_id"] or ""),
+                )
+            finally:
+                if cfg["cleanup"].get("delete_temporary_files", True):
+                    resume_child.unlink(missing_ok=True)
             cleanup_errors = cleanup_verified_sources(
                 sources,
                 canonical,
@@ -12346,11 +12381,16 @@ def migrate_classified_markdown(
             existing_record.get("legacy_child_doc_id")
             or row["child_doc_id"]
         )
+        legacy_raw_id = (
+            existing_record.get("legacy_raw_doc_id")
+            or row["raw_doc_id"]
+        )
         record = classification_to_dict(classification)
         record.update(
             {
                 "legacy_parent_doc_id": legacy_parent_id,
                 "legacy_child_doc_id": legacy_child_id,
+                "legacy_raw_doc_id": legacy_raw_id,
                 "migration_phase": "classified_local",
             }
         )
@@ -12432,6 +12472,7 @@ def migrate_classified_markdown(
             cfg["folders"]["work"],
             int(cfg["pairing"]["child_chars"]),
         )
+        raw_path: Path | None = None
         try:
             wc = cfg["weknora"]
             if classification.document_type in {"待分类", "其他资料"}:
@@ -12448,6 +12489,13 @@ def migrate_classified_markdown(
                         wc,
                         wc["child_knowledge_base"],
                     )
+                    if legacy_raw_id and wc.get("raw_knowledge_base"):
+                        weknora_delete(
+                            legacy_raw_id,
+                            target,
+                            wc,
+                            wc["raw_knowledge_base"],
+                        )
                 final_state = (
                     "classification_pending"
                     if classification.document_type == "待分类"
@@ -12563,6 +12611,21 @@ def migrate_classified_markdown(
                 row["group_id"],
                 classification,
             )
+            raw_path = raw_index_from_parent(target)
+            raw_doc_id = weknora_find_existing(
+                raw_path,
+                source_hint,
+                wc,
+                wc["raw_knowledge_base"],
+            ) or weknora_upload(
+                raw_path,
+                source_hint,
+                wc,
+                wc["raw_knowledge_base"],
+                "raw",
+                row["group_id"],
+                classification,
+            )
             verify_two_level_indexes(
                 target,
                 child_path,
@@ -12570,6 +12633,10 @@ def migrate_classified_markdown(
                 wc,
                 parent_doc_id,
                 child_doc_id,
+                classification=classification,
+                full_check=True,
+                raw_path=raw_path,
+                raw_doc_id=raw_doc_id,
             )
             record["migration_phase"] = "new_indexes_verified"
             save_group_state(
@@ -12581,6 +12648,8 @@ def migrate_classified_markdown(
                 parent_doc_id,
                 child_doc_id,
                 classification=record,
+                raw_path=raw_path,
+                raw_doc_id=raw_doc_id,
             )
             if delete_old_indexes:
                 if legacy_parent_id and legacy_parent_id != parent_doc_id:
@@ -12596,6 +12665,13 @@ def migrate_classified_markdown(
                         target,
                         wc,
                         wc["child_knowledge_base"],
+                    )
+                if legacy_raw_id and legacy_raw_id != raw_doc_id:
+                    weknora_delete(
+                        legacy_raw_id,
+                        target,
+                        wc,
+                        wc["raw_knowledge_base"],
                     )
                 record["migration_phase"] = "completed"
             else:
@@ -12618,6 +12694,8 @@ def migrate_classified_markdown(
                 child_doc_id,
                 "; ".join(cleanup_errors),
                 classification=record,
+                raw_path=raw_path,
+                raw_doc_id=raw_doc_id,
             )
             totals["completed"] += 1
         except Exception as exc:
