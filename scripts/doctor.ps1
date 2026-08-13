@@ -38,7 +38,7 @@ if (Test-Path $Cli) {
     $RuntimeProfile = "local"
     if (Test-Path $Config) {
         $ConfigText = [IO.File]::ReadAllText($Config, [Text.Encoding]::UTF8)
-        $ProfileMatch = [regex]::Match($ConfigText, '(?m)^  profile:\s*["'']?([^\s#"'']+)')
+        $ProfileMatch = [regex]::Match($ConfigText, '(?m)^\s+profile:\s*["'']?([^\s#"'']+)')
         if ($ProfileMatch.Success) { $RuntimeProfile = $ProfileMatch.Groups[1].Value }
     }
     & $Cli doctor --format json --profile $RuntimeProfile
