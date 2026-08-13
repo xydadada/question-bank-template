@@ -17,8 +17,8 @@ MinerU 或 MiMo。题目和解答均为本仓库编写的虚构样例，不来�
 - [`expected/raw.md`](expected/raw.md)：保留来源顺序的完整文字。
 
 实际文件会包含程序生成的 `group_id`、摘要、文档 ID 和更多处理状态。这里删去了这些
-运行时字段，只保留三层结构和检索时可见的分类信息。输出格式用于说明，不是逐字节的
-回归样本。
+运行时字段，只保留三层结构和检索时可见的分类信息。这些文件用于说明输出格式，逐字节
+回归由自动化测试负责。
 
 可以用下面的查询理解三层索引各自的作用：
 
@@ -35,8 +35,8 @@ WeKnora. The question and solution are synthetic and were written for this repos
 
 The two source files become a complete parent record, a focused child record, and a raw
 record that preserves source order. Real output also contains generated IDs, digests, and
-processing state. Those runtime fields are omitted here, so these files explain the format
-rather than define a byte-for-byte fixture.
+processing state. These examples omit runtime fields and explain the output format. Automated
+tests cover byte-level regression checks.
 
 Try reading the three expected files as the results of this query:
 

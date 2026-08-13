@@ -7,21 +7,20 @@
 [![License](https://img.shields.io/github/license/xydadada/question-bank-template)](LICENSE)
 [![Use this template](https://img.shields.io/badge/use_this-template-2ea44f)](https://github.com/new?template_owner=xydadada&template_name=question-bank-template)
 
-我写这个项目，是因为真正费时间的往往不是把文件拖进知识库，而是拖进去之前和之后
-的工作：拆分混杂资料、等待云端解析、补回题图信息、配对题目与答案、保留可恢复状态，
-最后还要确认每一层确实能搜到。
+我写这个项目，是因为把文件拖进知识库只占很少一部分时间。更多时间花在整理混杂资料、
+等待云端解析、补回题图信息、配对题目与答案、保留可恢复状态，以及确认每一层确实能搜到。
 
 这套模板把这些步骤接在一起。MinerU 解析文档，MiMo 描述重要题图，WeKnora 保存并
 检索父块、子块和原文。需要时，官方 WeKnora MCP 可以再把三层检索接到 ChatGPT。
-它不是新的 RAG 框架，也不是托管服务。
+它的定位是本机运行的编排模板，直接复用现成组件。
 
 目前维护和验证的环境是 Windows 11、WSL2、Docker Desktop 和 Windows 版 Ollama。
-仓库只提供代码、空配置和合成示例，不附带维护者的题库、密钥、账号、域名、知识库 ID
-或运行数据库。下载者使用自己的资料和服务账号。
+仓库提供代码、空配置和合成示例。题库、密钥、账号、域名、知识库 ID 和运行数据库均由
+下载者在自己的环境中创建和管理。
 
 > **项目状态：** 这是仍在演进的 alpha 模板。自动测试覆盖本地状态、安全门、脚本和
-> 失败恢复，但无法替你验证自己的 MinerU、MiMo、WeKnora 或 ChatGPT 账号。第一次请
-> 使用可丢弃的小文件，并保持所有永久删除开关关闭。
+> 失败恢复。MinerU、MiMo、WeKnora 和 ChatGPT 账号需要在实际环境中确认。第一次请
+> 使用可丢弃的小文件，并将所有永久删除开关保持为 `false`。
 
 ![从源文件到三层检索的处理流程](assets/pipeline.png)
 
@@ -29,7 +28,7 @@
 
 ```text
 inbox 中的文件、文件夹或压缩包
-→ 识别文件类型，视频不进入解析
+→ 识别文件类型，视频归入忽略分类
 → MinerU 解析文档
 → MiMo 判断并描述重要题图
 → 按资料组关联题目与答案
@@ -40,39 +39,40 @@ inbox 中的文件、文件夹或压缩包
 → 可选：OAuth + Cloudflare Tunnel + 官方 WeKnora MCP + ChatGPT
 ```
 
-图片说明和不确定分类默认使用 MiMo。本机只需要运行 Embedding。Wiki、图谱、摘要
-和 Rerank 不在默认流程中，永久删除也默认关闭。
+图片说明和疑难分类默认使用 MiMo，本机运行 Embedding。核心检索稳定后可以按需启用
+Wiki、图谱、摘要和 Rerank。永久删除开关初始为 `false`。
 
 ## 这个模板适合什么情况
 
 - 资料来源杂，既有 PDF，也有 Office 文档、图片、文件夹或压缩包。
 - 题目和答案可能分开保存，希望合并后再检索。
 - 希望保留整份原文，同时检索较小的题答块和带上下文的父块。
-- 希望 ChatGPT 能读取本地题库，但不想自己重写 OCR、RAG 或 MCP 服务。
+- 希望 ChatGPT 能读取本地题库，并直接复用现成的 OCR、RAG 和 MCP 组件。
 
-它没有替换 MinerU、WeKnora、Ollama、OAuth、向量数据库、Wiki 或 Neo4j。
-`ingest.py` 只负责在这些现成组件之间传递文件、记录状态并处理失败恢复。
+MinerU 负责解析，WeKnora 负责知识库和检索，Ollama 负责本地模型，OAuth 负责授权，
+Wiki 和 Neo4j 继续使用 WeKnora 的现成功能。`ingest.py` 在这些组件之间传递文件、记录
+状态并处理失败恢复。
 
-不适合的情况也很明确：它不是网页服务，不提供现成题库，不负责训练模型，目前也没有
-为 macOS 或原生 Linux 写安装入口。只需要导入几份普通 PDF 时，直接使用 WeKnora 会
-更省事。
+当前维护范围是 Windows 11 和 WSL2 上的自托管题库处理。资料与模型训练由使用者自行
+准备；macOS 和原生 Linux 用户需要改写安装入口。只导入几份普通 PDF 时，直接使用
+WeKnora 会更省事。
 
 ## 先看输出
 
-不准备立即安装时，可以先看[最小结构示例](examples/minimal-physics/README.md)。示例用
-一份仓库原创的弹簧振子题，展示分开的题目与答案如何变成父块、子块和原文三层。它不
-调用云端接口，也不包含真实题库内容。
+准备安装前可以先看[最小结构示例](examples/minimal-physics/README.md)。示例用一份仓库
+原创的弹簧振子题，展示分开的题目与答案如何变成父块、子块和原文三层。本地阅读即可
+看到完整结构，内容全部来自仓库的合成样本。
 
 ## 安全默认值
 
-默认配置宁可多保留文件，也不替使用者猜测：
+默认配置优先保留文件，删除动作需要使用者明确授权：
 
 - `.env`、`config.local.yaml`、题库、Markdown、日志和 `state.db` 都被 Git 忽略。
-- 脚本不会创建开机启动项，也不会修改 Windows 计划任务。
+- 所有脚本由用户手动启动，Windows 计划任务保持原状。
 - WeKnora 的 8080 和 8088 端口只绑定 `127.0.0.1`。
-- Redis 和 Neo4j 使用 `unless-stopped`，手动停止后不会因 Windows 或 Docker 重启而自行恢复。
+- Redis 和 Neo4j 使用 `unless-stopped`，手动停止状态会跨 Windows 或 Docker 重启保留。
 - 压缩包会检查路径、链接、成员数量和展开量，嵌套压缩包共用同一份安全预算。
-- 视频、原压缩包、`其他资料`和已入库源文件都不会被自动永久删除。
+- 视频、原压缩包、`其他资料`和已入库源文件默认保留。
 - MCP 使用单独的最小权限 Profile，OAuth 代理只监听 `127.0.0.1:18081`。
 
 永久删除需要同时修改配置，并在本机 `.env` 写入：
@@ -87,8 +87,8 @@ QUESTION_BANK_ALLOW_PERMANENT_DELETE=I_UNDERSTAND
 QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC=I_UNDERSTAND
 ```
 
-两种确认不能互相代替。首次运行请使用无隐私、可丢弃的小样本，并保持全部删除开关为
-`false`。具体步骤见[最小冒烟确认](docs/SMOKE_TEST.md)。
+两类操作各自使用独立确认门。首次运行请使用无隐私、可丢弃的小样本，并保持全部删除
+开关为 `false`。具体步骤见[最小冒烟确认](docs/SMOKE_TEST.md)。
 
 ## 运行前需要准备
 
@@ -103,9 +103,8 @@ QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC=I_UNDERSTAND
 - 自己的 MinerU API Key
 - 使用图片说明或模型兜底分类时，还需要自己的 MiMo API Key
 
-默认组合是 Docker Desktop、WSL2 Ubuntu 和 Windows Ollama。原生 WSL Docker 也能
-使用，但需要自行处理容器到 Ollama 的网络，不能假定
-`host.docker.internal:11434` 一定可达。
+默认组合是 Docker Desktop、WSL2 Ubuntu 和 Windows Ollama。使用原生 WSL Docker 时，
+需要另外配置容器到 Ollama 的网络，并为 `host.docker.internal:11434` 设置可达路径。
 
 ## 最短安装路径
 
@@ -118,9 +117,9 @@ cd question-bank-template
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1 -StartWeKnora
 ```
 
-引导脚本只在仓库内创建 Git 忽略目录、Python 环境、`.runtime/WeKnora` 和
-`bin/weknora.exe`。如果缺少需要管理员权限的系统组件，脚本会停止并给出官方链接，
-不会替你静默安装。WeKnora 固定到经过核验的 Release 提交。
+引导脚本在仓库内创建 Git 忽略目录、Python 环境、`.runtime/WeKnora` 和
+`bin/weknora.exe`。遇到需要管理员权限的系统组件时，脚本会停止并给出官方链接，系统
+安装仍由使用者决定。WeKnora 固定到经过核验的 Release 提交。
 
 安装完成后：
 
@@ -158,20 +157,20 @@ uv run python -c "import rapidocr, onnxruntime; print('OCR extra ready')"
 
 ## 本地目录
 
-| 目录 | 内容 | 是否提交 |
+| 目录 | 内容 | Git 状态 |
 |---|---|---|
-| `inbox/` | 等待处理的用户文件 | 否 |
-| `archives/` | 默认保留的已展开压缩包 | 否 |
-| `work/` | 下载包、分卷、截图等临时数据 | 否 |
-| `markdown/` | 最终分类 Markdown | 否 |
-| `failed/` | 失败并保留的源文件 | 否 |
-| `outputs/` | 本地报告和人工删除清单 | 否 |
-| `.runtime/` | WeKnora 源码、日志和 PID | 否 |
-| `profiles/` | 可公开的分类规则模板 | 是 |
+| `inbox/` | 等待处理的用户文件 | 忽略 |
+| `archives/` | 默认保留的已展开压缩包 | 忽略 |
+| `work/` | 下载包、分卷、截图等临时数据 | 忽略 |
+| `markdown/` | 最终分类 Markdown | 忽略 |
+| `failed/` | 失败并保留的源文件 | 忽略 |
+| `outputs/` | 本地报告和人工删除清单 | 忽略 |
+| `.runtime/` | WeKnora 源码、日志和 PID | 忽略 |
+| `profiles/` | 可公开的分类规则模板 | 跟踪 |
 
-源文件删除不是默认行为。启用后，程序也只会处理已完成三层入库和检索检查的资料。
-失败文件仍会保留。开关说明见[配置说明](docs/CONFIGURATION.md)，程序会停止而不是
-猜测处理的情况见[已知限制](docs/KNOWN_LIMITATIONS.md)。
+默认配置保留源文件。启用删除后，程序只处理已经完成三层入库和检索检查的资料，失败文件
+继续保留。开关说明见[配置说明](docs/CONFIGURATION.md)，触发主动停止的情况见
+[已知限制](docs/KNOWN_LIMITATIONS.md)。
 
 ## 接入 ChatGPT，可选
 
@@ -198,16 +197,16 @@ powershell -File .\mcp-public\start-all.ps1 `
 
 ## 组件与项目边界
 
-这个仓库使用以下现成项目，不维护它们的分叉版本：
+这个仓库直接使用以下现成项目及其官方版本：
 
 - [MinerU](https://github.com/opendatalab/MinerU) 解析文档。
 - [WeKnora](https://github.com/Tencent/WeKnora) 保存知识库、生成索引并提供官方 MCP。
 - [Ollama](https://ollama.com/) 在本机运行 Embedding 和可选 OCR 模型。
 - MiMo 处理重要图片说明和规则无法确定的资料分类。
 
-公开模板不是作者私人运行目录的副本。下载者需要通过官方 CLI 创建自己的三个
-知识库和 Profile。仓库不会提供现成题库、真实知识库 ID、Cloudflare Tunnel、账号、
-域名、日志、运行数据库或私人构建的 WeKnora CLI。第三方来源和固定版本记录在
+公开仓库是一份可复用模板。下载者通过官方 CLI 创建自己的三个知识库和 Profile，并在
+本机保存题库、知识库 ID、Cloudflare Tunnel、账号、域名、日志和运行数据库。仓库跟踪
+的是代码、空配置、合成示例及公开规则模板。第三方来源和固定版本记录在
 [第三方声明](THIRD_PARTY_NOTICES.md)中。
 
 ## 贡献与许可
