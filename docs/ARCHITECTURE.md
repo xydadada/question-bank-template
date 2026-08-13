@@ -15,8 +15,8 @@ input discovery / archive classification
 
 `ingest.py` owns orchestration, resumable state and guarded cleanup. MinerU owns
 document parsing; MiMo owns cloud image understanding; WeKnora owns indexing,
-vector storage, BM25 and the MCP tool surface. No upstream source is vendored or
-modified.
+vector storage, BM25 and the MCP tool surface. Upstream components stay on their
+official sources and reviewed releases.
 
-Local state is SQLite (`state.db`) with WAL enabled. It is an execution record,
-not a distributable sample database. Every clone starts empty.
+Local state is SQLite (`state.db`) with WAL enabled. Each clone creates an empty,
+local execution record.

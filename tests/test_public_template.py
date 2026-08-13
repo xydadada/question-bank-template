@@ -132,6 +132,31 @@ class PublicTemplateTests(unittest.TestCase):
         self.assertIn('".svg"', audit)
         self.assertNotIn('"assets/"', audit)
 
+    def test_community_post_pipeline_links_follow_readme_heading(self) -> None:
+        readme = (ROOT / "README.md").read_text("utf-8")
+        community_posts = (ROOT / "docs" / "COMMUNITY_POSTS.md").read_text("utf-8")
+
+        self.assertIn("## 它实际做什么", readme)
+        self.assertEqual(community_posts.count("#它实际做什么"), 2)
+        self.assertNotIn("#处理流程", community_posts)
+
+    def test_tracked_markdown_local_links_resolve(self) -> None:
+        markdown_files = [path for path in publishable_files() if path.suffix == ".md"]
+        missing: list[str] = []
+        for markdown in markdown_files:
+            text = markdown.read_text("utf-8")
+            for match in re.finditer(r"(?<!!)\[[^\]]+\]\(([^)]+)\)", text):
+                target = match.group(1).strip().strip("<>")
+                if target.startswith(("http://", "https://", "mailto:", "#")):
+                    continue
+                relative = target.split("#", 1)[0]
+                if relative and not (markdown.parent / relative).resolve().exists():
+                    line = text.count("\n", 0, match.start()) + 1
+                    missing.append(
+                        f"{markdown.relative_to(ROOT)}:{line} -> {target}"
+                    )
+        self.assertEqual(missing, [])
+
     def test_provider_diagnostics_redact_signed_urls_and_credentials(self) -> None:
         import ingest
 

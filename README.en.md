@@ -7,25 +7,25 @@
 [![License](https://img.shields.io/github/license/xydadada/question-bank-template)](LICENSE)
 [![Use this template](https://img.shields.io/badge/use_this-template-2ea44f)](https://github.com/new?template_owner=xydadada&template_name=question-bank-template)
 
-I started this project because the slow part of building a question bank was rarely the
-upload itself. The work around it kept growing: sorting mixed files, waiting for cloud
-parsing, restoring information from figures, pairing separate questions and solutions,
-keeping enough state to resume, and checking that each index could retrieve its own data.
+I started this project after the work around each upload kept growing: sorting mixed files,
+waiting for cloud parsing, restoring information from figures, pairing separate questions
+and solutions, keeping enough state to resume, and checking that each index could retrieve
+its own data.
 
 This template connects those steps. MinerU parses documents, MiMo describes important
 figures, and WeKnora stores parent records, child records, and full Markdown. The official
-WeKnora MCP can expose those three retrieval layers to ChatGPT when needed. This is an
-orchestration project, not a new RAG framework or a hosted service.
+WeKnora MCP can expose those three retrieval layers to ChatGPT when needed. The project is
+a self-hosted orchestration template built around existing components.
 
 The maintained setup is Windows 11 with WSL2, Docker Desktop, and Ollama on Windows. The
-repository contains code, blank configuration, and synthetic examples. It does not ship
-the maintainer's documents, keys, accounts, domains, knowledge-base IDs, or runtime
-database. Each user supplies their own documents and service accounts.
+repository contains code, blank configuration, and synthetic examples. Each user creates
+and manages their own documents, keys, accounts, domains, knowledge-base IDs, and runtime
+database.
 
 > **Project status:** this is an alpha template under active development. Automated tests
-> cover local state, safety interlocks, scripts, and failure recovery. They cannot validate
-> your MinerU, MiMo, WeKnora, or ChatGPT account. Start with a disposable file and leave all
-> permanent-deletion settings disabled.
+> cover local state, safety interlocks, scripts, and failure recovery. Account validation for
+> MinerU, MiMo, WeKnora, and ChatGPT happens in the user's environment. Start with a
+> disposable file and keep every permanent-deletion setting at `false`.
 
 ![Pipeline from source files to three retrieval layers](assets/pipeline.png)
 
@@ -33,7 +33,7 @@ database. Each user supplies their own documents and service accounts.
 
 ```text
 files, folders, or archives placed in inbox
-→ classify file types and keep video out of document parsing
+→ classify file types and route video to the ignored category
 → parse documents with MinerU
 → use MiMo to decide which figures matter and describe them
 → pair questions with answers at the document-group level
@@ -44,42 +44,42 @@ files, folders, or archives placed in inbox
 → optional: OAuth + Cloudflare Tunnel + official WeKnora MCP + ChatGPT
 ```
 
-MiMo handles figure descriptions and classifications that the deterministic rules cannot
-settle. The local machine only needs an Embedding model. Wiki generation, knowledge graphs,
-summaries, and Rerank are not part of the default pipeline. Permanent deletion is off by
-default.
+MiMo handles figure descriptions and classifications that remain ambiguous after the
+deterministic rules. The local machine runs the Embedding model. Wiki generation, knowledge
+graphs, summaries, and Rerank can be enabled after core retrieval is stable. Permanent
+deletion starts with a `false` setting.
 
 ## When this template fits
 
 - Your source collection mixes PDFs, Office files, images, folders, and archives.
 - Questions and answers may live in separate files and should be paired before indexing.
 - You want full source text as well as smaller question-answer records and parent context.
-- You want ChatGPT to retrieve from a local question bank without writing a new OCR, RAG,
-  or MCP service.
+- You want ChatGPT to retrieve from a local question bank while reusing existing OCR, RAG,
+  and MCP components.
 
-The project does not replace MinerU, WeKnora, Ollama, OAuth, a vector database, Wiki, or
-Neo4j. `ingest.py` moves data between those existing components, records resumable state,
-and handles failure recovery.
+MinerU owns parsing, WeKnora owns the knowledge bases and retrieval, Ollama runs local
+models, and OAuth handles authorization. Wiki and Neo4j continue to use WeKnora's existing
+features. `ingest.py` moves data between those components, records resumable state, and
+handles failure recovery.
 
-It is also deliberately narrow. It is not a hosted web application, does not provide a
-question-bank corpus, and does not train models. There is no maintained installer for macOS
-or native Linux. If you only need to import a few ordinary PDFs, using WeKnora directly is
-probably simpler.
+The maintained scope is a self-hosted question-bank pipeline for Windows 11 and WSL2. Users
+supply the corpus and any model training. macOS and native Linux require adapted installation
+entry points. For a handful of ordinary PDFs, direct WeKnora import is usually simpler.
 
 ## See the output first
 
 The [minimal structure example](examples/minimal-physics/README.md) shows how a separate
 question and solution become parent, child, and raw records. The oscillator problem was
-written for this repository. Reading the example does not call a cloud API or require a real
-question bank.
+written for this repository. The complete structure is visible locally and all content comes
+from the synthetic sample in the repository.
 
 ## Safe defaults
 
-The default configuration preserves files rather than guessing what can be removed:
+The default configuration keeps files until the user explicitly authorizes deletion:
 
 - Git ignores `.env`, `config.local.yaml`, documents, generated Markdown, logs, and
   `state.db`.
-- The scripts do not create startup tasks or change Windows Task Scheduler.
+- Every script starts manually, while Windows Task Scheduler stays unchanged.
 - WeKnora ports 8080 and 8088 bind to `127.0.0.1` only.
 - Redis and Neo4j use `unless-stopped`, so a manual stop survives a Windows or Docker
   restart.
@@ -102,8 +102,8 @@ Explorer-style deletion propagation has a separate acknowledgement:
 QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC=I_UNDERSTAND
 ```
 
-One acknowledgement cannot authorize the other. Start with a disposable document that
-contains no private data and leave every deletion option set to `false`. Follow the
+Each action has its own acknowledgement. Start with a disposable document free of private
+data and leave every deletion option set to `false`. Follow the
 [smoke test](docs/SMOKE_TEST.md) before using real material.
 
 ## Requirements
@@ -120,8 +120,8 @@ contains no private data and leave every deletion option set to `false`. Follow 
 - your own MiMo API key when figure descriptions or model-assisted classification are used
 
 The documented setup uses Docker Desktop, WSL2 Ubuntu, and Ollama on Windows. Native Docker
-inside WSL can work, but you must configure container access to Ollama yourself. Do not
-assume that `host.docker.internal:11434` is available in that setup.
+inside WSL can work when container access to Ollama is configured separately. Set a reachable
+route for `host.docker.internal:11434` in that setup.
 
 ## Shortest installation path
 
@@ -137,7 +137,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1 -StartWeKnora
 The bootstrap script creates ignored directories, the Python environment,
 `.runtime/WeKnora`, and `bin/weknora.exe` inside the repository. If a missing system
 component needs administrator access, the script stops and prints the official installation
-link instead of installing it silently. WeKnora is pinned to a reviewed release commit.
+link and leaves the system installation to the user. WeKnora is pinned to a reviewed release
+commit.
 
 After bootstrap:
 
@@ -176,22 +177,21 @@ uv run python -c "import rapidocr, onnxruntime; print('OCR extra ready')"
 
 ## Local directories
 
-| Directory | Contents | Tracked by Git |
+| Directory | Contents | Git status |
 |---|---|---|
-| `inbox/` | source files waiting for processing | no |
-| `archives/` | extracted source archives, retained by default | no |
-| `work/` | downloads, split files, screenshots, and temporary data | no |
-| `markdown/` | final classified Markdown | no |
-| `failed/` | failed source files that must be retained | no |
-| `outputs/` | local reports and manual-deletion manifests | no |
-| `.runtime/` | WeKnora source, logs, and PID files | no |
-| `profiles/` | publishable classification templates | yes |
+| `inbox/` | source files waiting for processing | ignored |
+| `archives/` | extracted source archives, retained by default | ignored |
+| `work/` | downloads, split files, screenshots, and temporary data | ignored |
+| `markdown/` | final classified Markdown | ignored |
+| `failed/` | failed source files that must be retained | ignored |
+| `outputs/` | local reports and manual-deletion manifests | ignored |
+| `.runtime/` | WeKnora source, logs, and PID files | ignored |
+| `profiles/` | publishable classification templates | tracked |
 
-Source deletion is not a default behavior. When enabled, it applies only after the three
-index layers pass their upload and retrieval checks. Failed files remain on disk. See
-[configuration](docs/CONFIGURATION.md) for the switches and
-[known limitations](docs/KNOWN_LIMITATIONS.md) for cases where the program stops instead of
-guessing.
+The default configuration retains source files. After deletion is enabled, it applies only
+to documents whose three index layers passed upload and retrieval checks. Failed files stay
+on disk. See [configuration](docs/CONFIGURATION.md) for the switches and
+[known limitations](docs/KNOWN_LIMITATIONS.md) for conditions that trigger a deliberate stop.
 
 ## Connect ChatGPT, optional
 
@@ -220,19 +220,20 @@ copy the profile, edit its document types and module vocabulary, and set
 
 ## Components and project boundary
 
-The template uses these existing projects without maintaining private forks:
+The template uses the official versions of these existing projects:
 
 - [MinerU](https://github.com/opendatalab/MinerU) parses documents.
 - [WeKnora](https://github.com/Tencent/WeKnora) stores the knowledge bases, builds indexes,
   and provides the official MCP.
 - [Ollama](https://ollama.com/) runs the local Embedding model and optional OCR model.
-- MiMo describes important figures and classifies documents that the rules cannot settle.
+- MiMo describes important figures and classifies documents that remain ambiguous after the rules.
 
-This public repository is not a copy of the maintainer's private runtime directory. Each
-user creates their own three knowledge bases and CLI profiles. The repository contains no
-prepared question bank, live knowledge base ID, Cloudflare Tunnel, user account, domain,
-log, runtime database, or privately built WeKnora CLI. Third-party sources and pinned
-versions are listed in [third-party notices](THIRD_PARTY_NOTICES.md).
+This public repository is a reusable template. Each user creates three knowledge bases and
+CLI profiles through the official tools, then keeps the question bank, knowledge-base IDs,
+Cloudflare Tunnel, accounts, domains, logs, and runtime database in their own environment.
+Git tracks the code, blank configuration, synthetic examples, and public classification
+profiles. Third-party sources and pinned versions are listed in
+[third-party notices](THIRD_PARTY_NOTICES.md).
 
 ## Contributing and license
 
