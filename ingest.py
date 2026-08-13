@@ -1328,12 +1328,45 @@ def supervisor_progress_stamp() -> float:
     )
 
 
+def trusted_system_executable(name: str) -> Path | None:
+    """Resolve a system tool without consulting the repository or current directory."""
+    candidates: list[Path] = []
+    if os.name == "nt":
+        try:
+            buffer = ctypes.create_unicode_buffer(32768)
+            length = ctypes.windll.kernel32.GetSystemDirectoryW(
+                buffer, len(buffer)
+            )
+            if 0 < length < len(buffer):
+                candidates.append(Path(buffer.value) / name)
+        except (AttributeError, OSError, ValueError):
+            return None
+    else:
+        discovered = shutil.which(name)
+        if discovered:
+            candidates.append(Path(discovered))
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if resolved.is_file() and resolved.is_absolute():
+            return resolved
+    return None
+
+
 def supervisor_gpu_active(threshold_percent: int) -> bool:
     """Treat any NVIDIA workload as activity to avoid a false restart."""
+    executable = trusted_system_executable(
+        "nvidia-smi.exe" if os.name == "nt" else "nvidia-smi"
+    )
+    if executable is None:
+        return True
     try:
         result = subprocess.run(
             [
-                "nvidia-smi",
+                str(executable),
                 "--query-gpu=utilization.gpu",
                 "--format=csv,noheader,nounits",
             ],
@@ -1385,14 +1418,18 @@ def stop_supervised_process_tree(process: subprocess.Popen) -> None:
     """Stop only the exact ingest worker tree owned by this supervisor."""
     if process.poll() is not None:
         return
+    taskkill = trusted_system_executable("taskkill.exe")
     try:
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            cwd=ROOT,
-            capture_output=True,
-            timeout=30,
-            check=False,
-        )
+        if taskkill is None:
+            process.terminate()
+        else:
+            subprocess.run(
+                [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
+                cwd=ROOT,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
     except (OSError, subprocess.SubprocessError):
         process.terminate()
     try:

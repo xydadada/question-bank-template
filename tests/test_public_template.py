@@ -273,6 +273,49 @@ class PublicTemplateTests(unittest.TestCase):
                 observed = ingest.supervisor_progress_stamp()
         self.assertAlmostEqual(observed, expected, delta=1.0)
 
+    def test_supervisor_runs_only_absolute_trusted_system_tools(self) -> None:
+        import ingest
+
+        nvidia_smi = Path("C:/Windows/System32/nvidia-smi.exe")
+        result = mock.Mock(stdout="37\n")
+        with (
+            mock.patch.object(
+                ingest, "trusted_system_executable", return_value=nvidia_smi
+            ),
+            mock.patch.object(
+                ingest.subprocess, "run", return_value=result
+            ) as run,
+        ):
+            self.assertTrue(ingest.supervisor_gpu_active(10))
+        self.assertEqual(Path(run.call_args.args[0][0]), nvidia_smi)
+        self.assertTrue(Path(run.call_args.args[0][0]).is_absolute())
+
+        worker = mock.Mock(pid=1234)
+        worker.poll.return_value = None
+        worker.wait.return_value = 0
+        taskkill = Path("C:/Windows/System32/taskkill.exe")
+        with (
+            mock.patch.object(
+                ingest, "trusted_system_executable", return_value=taskkill
+            ),
+            mock.patch.object(ingest.subprocess, "run") as run,
+        ):
+            ingest.stop_supervised_process_tree(worker)
+        self.assertEqual(Path(run.call_args.args[0][0]), taskkill)
+        self.assertTrue(Path(run.call_args.args[0][0]).is_absolute())
+
+    def test_missing_gpu_probe_fails_safe_without_spawning_a_process(self) -> None:
+        import ingest
+
+        with (
+            mock.patch.object(
+                ingest, "trusted_system_executable", return_value=None
+            ),
+            mock.patch.object(ingest.subprocess, "run") as run,
+        ):
+            self.assertTrue(ingest.supervisor_gpu_active(10))
+        run.assert_not_called()
+
     def test_every_mutating_cli_mode_uses_the_shared_mutation_lock(self) -> None:
         """Maintenance commands must not race the long-running ingest worker."""
         source = (ROOT / "ingest.py").read_text("utf-8")
@@ -1278,6 +1321,15 @@ class PublicTemplateTests(unittest.TestCase):
         source = (ROOT / "ingest.py").read_text("utf-8")
         self.assertNotIn("import fitz", source)
 
+    def test_uv_project_is_an_explicit_clone_and_run_application(self) -> None:
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))
+        self.assertFalse(project["tool"]["uv"]["package"])
+        self.assertNotIn("build-system", project)
+        self.assertNotIn(
+            "License :: OSI Approved :: MIT License",
+            project["project"]["classifiers"],
+        )
+
     def test_pdf_render_crop_and_image_resize(self) -> None:
         import ingest
 
@@ -1406,11 +1458,17 @@ class PublicTemplateTests(unittest.TestCase):
         self.assertIn("embedding_model_id", script)
         self.assertIn("ExistingProfile.host", script)
         self.assertNotIn('.Replace(\'"__PARENT_KB_ID__"\'', script)
+        self.assertIn('$Text = Set-YamlScalar $Text "profile" $Profile', script)
+        self.assertIn(
+            '$Text = Set-YamlScalar $Text "setup_profile" $Profile', script
+        )
+        self.assertNotIn("(?m)^  profile:", script)
 
     def test_doctor_allows_retrieval_without_build_tools_or_provider_keys(self) -> None:
         script = (ROOT / "scripts" / "doctor.ps1").read_text("utf-8")
         self.assertIn("existing knowledge-base retrieval can still work", script)
         self.assertIn("existing WeKnora CLI can run", script)
+        self.assertIn("(?m)^\\s+profile:", script)
 
     def test_mimo_documentation_matches_safe_example_limits(self) -> None:
         config = yaml.safe_load((ROOT / "config.example.yaml").read_text("utf-8"))

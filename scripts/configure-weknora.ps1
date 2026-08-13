@@ -136,8 +136,8 @@ $Text = Set-YamlScalar $Text "knowledge_base" $ParentId
 $Text = Set-YamlScalar $Text "parent_knowledge_base" $ParentId
 $Text = Set-YamlScalar $Text "child_knowledge_base" $ChildId
 $Text = Set-YamlScalar $Text "raw_knowledge_base" $RawId
-$Text = [regex]::Replace($Text, '(?m)^  profile: .+$', "  profile: $Profile")
-$Text = [regex]::Replace($Text, '(?m)^  setup_profile: .+$', "  setup_profile: $Profile")
+$Text = Set-YamlScalar $Text "profile" $Profile
+$Text = Set-YamlScalar $Text "setup_profile" $Profile
 [System.IO.File]::WriteAllText($Config, $Text, [System.Text.UTF8Encoding]::new($false))
 
 & $Cli doctor --format json --profile $Profile
