@@ -5,9 +5,16 @@
 
 ## 必填项
 
-- `.env`：至少一个 `MINERU_API_TOKEN`。
-- 需要图片说明或模型兜底分类时：至少一个 `MIMO_API_KEY`。
+- 云端 MinerU：`.env` 中至少一个 `MINERU_API_TOKEN`；本地 MinerU 无需 Key。
+- 选择 MiMo 图片说明或云端分类时：至少一个 `MIMO_API_KEY`。
 - `config.local.yaml`：三个知识库 ID。`configure-weknora.ps1` 会自动创建并填写。
+
+## 模型选择
+
+`model_selection.file` 默认指向被 Git 忽略的 `models.local.yaml`。该文件存在时，
+其角色选择会覆盖 `mineru`、`ollama` 和 `weknora.models` 中对应的旧式字段；文件
+缺失时现有配置行为保持不变。预设、可选模型和换 Embedding 的规则见
+[本地与云端模型](LOCAL_MODELS.md)。
 
 同一提供商、同一账号下的多个 Key 不一定拥有独立限额。流水线会弹性调整并发，
 但不会把“Key 数量”直接当作吞吐量保证。

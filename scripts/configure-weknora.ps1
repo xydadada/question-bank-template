@@ -4,6 +4,7 @@ param(
     [string]$Profile = "local",
     [string]$EmbeddingModel = "qwen3-embedding:0.6b",
     [int]$EmbeddingDimension = 1024,
+    [string]$ChatModel = "",
     [string]$OllamaBaseUrl = "http://host.docker.internal:11434"
 )
 
@@ -13,6 +14,24 @@ $Cli = Join-Path $Root "bin\weknora.exe"
 $Config = Join-Path $Root "config.local.yaml"
 if (-not (Test-Path $Cli)) { throw "Missing bin/weknora.exe. Run scripts/bootstrap.ps1 first." }
 if (-not (Test-Path $Config)) { throw "Missing config.local.yaml. Run scripts/bootstrap.ps1 first." }
+
+$ModelSelection = Join-Path $Root "models.local.yaml"
+if (Test-Path $ModelSelection) {
+    $Uv = Get-Command uv -ErrorAction SilentlyContinue
+    if (-not $Uv) { throw "Missing uv; it is required to resolve models.local.yaml." }
+    $ResolvedRaw = (& $Uv.Source run python model_manager.py resolve 2>$null) -join "`n"
+    if ($LASTEXITCODE -ne 0) { throw "Could not resolve models.local.yaml." }
+    $Resolved = $ResolvedRaw | ConvertFrom-Json
+    if ($Resolved.roles.embedding.runtime -eq "ollama") {
+        $EmbeddingModel = [string]$Resolved.roles.embedding.model
+        $EmbeddingDimension = [int]$Resolved.embedding_dimension
+    }
+    if ($Resolved.roles.chat.runtime -eq "ollama") {
+        $ChatModel = [string]$Resolved.roles.chat.model
+    } elseif ($Resolved.roles.chat.runtime -eq "disabled") {
+        $ChatModel = ""
+    }
+}
 
 function Run-Json([string[]]$Arguments) {
     # The CLI reserves stdout for JSON but may write harmless notices to
@@ -47,6 +66,10 @@ if ($LASTEXITCODE -ne 0) { throw "WeKnora login failed." }
 if (Get-Command ollama -ErrorAction SilentlyContinue) {
     & ollama pull $EmbeddingModel
     if ($LASTEXITCODE -ne 0) { throw "Ollama model pull failed." }
+    if ($ChatModel) {
+        & ollama pull $ChatModel
+        if ($LASTEXITCODE -ne 0) { throw "Ollama chat model pull failed." }
+    }
 } else {
     Write-Warning "Ollama is not in PATH. Ensure '$EmbeddingModel' is available before indexing."
 }
@@ -86,6 +109,41 @@ if (-not $ExistingModel) {
 }
 if (-not $EmbeddingModelId) { throw "Embedding model ID could not be determined." }
 
+$ChatModelId = ""
+if ($ChatModel) {
+    $ExistingChatModel = $ModelRows | Where-Object {
+        $_.name -eq $ChatModel -and $_.type -in @("KnowledgeQA", "chat", "LLM")
+    } | Select-Object -First 1
+    if (-not $ExistingChatModel) {
+        $CreatedChatModel = Run-Json @(
+            "model", "create", $ChatModel,
+            "--source", "local", "--type", "chat",
+            "--base-url", $OllamaBaseUrl,
+            "--display-name", "Local $ChatModel",
+            "--format", "json", "--profile", $Profile
+        )
+        $ChatModelId = [string]$CreatedChatModel.data.id
+    } else {
+        $ChatModelView = Run-Json @(
+            "model", "view", ([string]$ExistingChatModel.id),
+            "--format", "json", "--profile", $Profile
+        )
+        $ChatModelData = $ChatModelView.data
+        $ChatActualBaseUrl = ([string]$ChatModelData.parameters.base_url).TrimEnd('/')
+        $ChatExpectedBaseUrl = $OllamaBaseUrl.TrimEnd('/')
+        if (
+            $ChatModelData.source -ne "local" -or
+            -not $ChatActualBaseUrl.Equals(
+                $ChatExpectedBaseUrl, [StringComparison]::OrdinalIgnoreCase
+            )
+        ) {
+            throw "Existing chat model '$ChatModel' conflicts with the requested local configuration."
+        }
+        $ChatModelId = [string]$ExistingChatModel.id
+    }
+    if (-not $ChatModelId) { throw "Chat model ID could not be determined." }
+}
+
 function Ensure-KnowledgeBase([string]$Name, [string]$Description) {
     $List = Run-Json @("kb", "list", "--limit", "10000", "--format", "json", "--profile", $Profile)
     $Matches = @($List.data) | Where-Object { $_.name -eq $Name }
@@ -97,14 +155,27 @@ function Ensure-KnowledgeBase([string]$Name, [string]$Description) {
         if ([string]$Existing.embedding_model_id -ne $EmbeddingModelId) {
             throw "Knowledge base '$Name' uses embedding model '$($Existing.embedding_model_id)', expected '$EmbeddingModelId'. Change it explicitly or use a different knowledge-base name."
         }
+        $ExistingChatId = [string]$Existing.summary_model_id
+        if (-not $ExistingChatId) { $ExistingChatId = [string]$Existing.chat_model_id }
+        if ($ChatModelId -and $ExistingChatId -ne $ChatModelId) {
+            Run-Json @(
+                "kb", "config", "set", ([string]$Existing.id),
+                "--chat-model", $ChatModel,
+                "--embedding-model", $EmbeddingModel,
+                "-y",
+                "--format", "json", "--profile", $Profile
+            ) | Out-Null
+        }
         return [string]$Existing.id
     }
-    $Created = Run-Json @(
+    $CreateArguments = @(
         "kb", "create", $Name,
         "--description", $Description,
-        "--embedding-model", $EmbeddingModel,
-        "--format", "json", "--profile", $Profile
+        "--embedding-model", $EmbeddingModel
     )
+    if ($ChatModelId) { $CreateArguments += @("--chat-model", $ChatModel) }
+    $CreateArguments += @("--format", "json", "--profile", $Profile)
+    $Created = Run-Json $CreateArguments
     return [string]$Created.data.id
 }
 

@@ -116,8 +116,8 @@ data and leave every deletion option set to `false`. Follow the
 - Go 1.26 or newer, used only to build the official WeKnora CLI
 - [Ollama](https://ollama.com/download)
 - the `7z` command from 7-Zip, needed only for archive input
-- your own MinerU API key
-- your own MiMo API key when figure descriptions or model-assisted classification are used
+- your own MinerU API key when using the hosted parser; local MinerU needs no key
+- your own MiMo API key only when MiMo is selected for vision or classification
 
 The documented setup uses Docker Desktop, WSL2 Ubuntu, and Ollama on Windows. Native Docker
 inside WSL can work when container access to Ollama is configured separately. Set a reachable
@@ -143,11 +143,20 @@ commit.
 After bootstrap:
 
 1. Open <http://127.0.0.1:8088> and create or sign in to a local WeKnora account.
-2. Run `powershell -File .\scripts\configure-weknora.ps1` and sign in through the official
-   CLI.
-3. Copy `.env.example` to `.env` and add your MinerU and MiMo keys.
-4. Put a few disposable files in `inbox`.
-5. Start processing.
+2. Select a local, hybrid, or cloud preset with `model_manager.py select`, then install it.
+3. Run `powershell -File .\scripts\configure-weknora.ps1` and sign in through the official
+   CLI. The script binds the selected embedding and optional chat model.
+4. Copy `.env.example` to `.env` and add only the keys required by selected cloud roles.
+5. Put a few disposable files in `inbox`, then start processing.
+
+Parsing, OCR, vision, classification, embedding, and text generation are selectable roles.
+See [local and cloud models](docs/LOCAL_MODELS.md) for presets and on-demand downloads:
+
+```powershell
+uv run python model_manager.py list
+uv run python model_manager.py select local-light
+uv run python model_manager.py install
+```
 
 ```powershell
 powershell -File .\scripts\start.ps1 -Processing

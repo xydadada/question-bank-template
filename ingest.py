@@ -102,6 +102,109 @@ PROVIDER_BEARER_SECRET = re.compile(
 )
 
 
+def apply_model_selection(cfg: dict) -> dict:
+    """Overlay an optional role-based model selection onto legacy settings."""
+    selection_cfg = cfg.get("model_selection") or {}
+    selected_path = Path(
+        selection_cfg.get("file") or ROOT / "models.local.yaml"
+    )
+    if not selected_path.is_absolute():
+        selected_path = (ROOT / selected_path).resolve()
+    if not selected_path.is_file():
+        return cfg
+    catalog_path = ROOT / "models" / "catalog.yaml"
+    catalog_value = yaml.safe_load(catalog_path.read_text("utf-8"))
+    selection = yaml.safe_load(selected_path.read_text("utf-8"))
+    entries = (catalog_value or {}).get("models") or {}
+    local_catalog_path = ROOT / "models.catalog.local.yaml"
+    if local_catalog_path.is_file():
+        local_catalog = yaml.safe_load(local_catalog_path.read_text("utf-8"))
+        local_entries = (local_catalog or {}).get("models") or {}
+        if not isinstance(local_entries, dict):
+            raise RuntimeError("本地模型目录models必须是映射")
+        entries = {**entries, **local_entries}
+    roles = (selection or {}).get("roles") or {}
+    if not isinstance(roles, dict):
+        raise RuntimeError(f"模型选择roles必须是映射: {selected_path}")
+    resolved: dict[str, dict] = {}
+    for role, model_id in roles.items():
+        entry = entries.get(model_id)
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"模型目录中不存在: {model_id}")
+        if role not in set(entry.get("roles") or []):
+            raise RuntimeError(f"{model_id}不能用于{role}角色")
+        resolved[role] = entry
+
+    parser = resolved.get("parser")
+    if parser:
+        cfg["mineru"]["provider"] = (
+            "local" if parser.get("runtime") == "mineru-local" else "cloud"
+        )
+        cfg["mineru"]["model_version"] = parser.get(
+            "model", cfg["mineru"].get("model_version", "vlm")
+        )
+        cfg["mineru"].setdefault("local", {})["backend"] = parser.get(
+            "backend", "pipeline"
+        )
+
+    ollama_cfg = cfg["ollama"]
+    ocr = resolved.get("ocr")
+    if ocr:
+        runtime = str(ocr.get("runtime") or "disabled")
+        ollama_cfg["ocr_provider"] = (
+            "rapidocr" if runtime == "python-extra" else runtime
+        )
+        ollama_cfg["ocr_enabled"] = runtime != "disabled"
+        if runtime == "ollama":
+            ollama_cfg["ocr_model"] = ocr.get("model")
+
+    vision = resolved.get("vision")
+    if vision:
+        runtime = str(vision.get("runtime") or "disabled")
+        ollama_cfg["vision_provider"] = (
+            "mimo" if runtime == "openai-compatible" else runtime
+        )
+        if runtime == "ollama":
+            ollama_cfg["vision_model"] = vision.get("model")
+
+    classification = resolved.get("classification")
+    if classification:
+        runtime = str(classification.get("runtime") or "disabled")
+        ollama_cfg["classification_provider"] = (
+            "mimo" if runtime == "openai-compatible" else runtime
+        )
+        if runtime == "ollama":
+            ollama_cfg["classification_model"] = classification.get("model")
+
+    embedding = resolved.get("embedding")
+    if embedding:
+        cfg["weknora"]["models"]["provider"] = embedding.get("runtime")
+        cfg["weknora"]["models"]["embedding"] = embedding.get("model")
+        dimension = (selection or {}).get("embedding_dimension")
+        allowed_dimensions = list(embedding.get("dimensions") or [])
+        if allowed_dimensions and dimension not in allowed_dimensions:
+            raise RuntimeError(
+                f"Embedding维度{dimension}不在目录声明{allowed_dimensions}中"
+            )
+        if dimension:
+            cfg["weknora"]["models"]["embedding_dimension"] = int(dimension)
+
+    for role in ("chat", "rerank"):
+        entry = resolved.get(role)
+        if entry:
+            cfg["weknora"]["models"][role] = entry.get("model")
+            cfg["weknora"]["models"][f"{role}_provider"] = entry.get(
+                "runtime"
+            )
+
+    cfg["active_model_selection"] = {
+        "path": str(selected_path),
+        "name": str((selection or {}).get("name") or selected_path.stem),
+        "roles": {role: roles[role] for role in roles},
+    }
+    return cfg
+
+
 def print(*args, **kwargs) -> None:
     """Keep progress records atomic when document and image workers overlap."""
     with PRINT_LOCK:
@@ -950,6 +1053,7 @@ def load_settings(config_path: str | Path | None = None) -> dict:
         raise RuntimeError(
             "配置区段必须是YAML映射: " + ", ".join(invalid_sections)
         )
+    cfg = apply_model_selection(cfg)
     weknora_cfg = cfg.get("weknora", {})
     NEO4J_RUNTIME_CONFIG = {
         "wsl_distro": str(weknora_cfg.get("wsl_distro", "Ubuntu")),
@@ -2709,6 +2813,123 @@ def download_recovered_results(
     return sorted(markdowns, key=lambda pair: pair[0].start_page)
 
 
+def local_mineru_executable(cfg: dict) -> str:
+    requested = str((cfg.get("local") or {}).get("executable") or "mineru")
+    discovered = shutil.which(requested)
+    if discovered:
+        return discovered
+    candidates = (
+        ROOT / ".runtime" / "mineru" / "Scripts" / "mineru.exe",
+        ROOT / ".runtime" / "mineru" / "bin" / "mineru",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    raise RuntimeError(
+        "MinerU本地运行时尚未安装；先运行model_manager.py install"
+    )
+
+
+def run_local_mineru(
+    parts: list[SourcePart], cfg: dict, job: Path
+) -> list[tuple[SourcePart, Path]]:
+    """Run the official MinerU CLI in its isolated on-demand environment."""
+    executable = local_mineru_executable(cfg)
+    local_cfg = cfg.get("local") or {}
+    backend = str(local_cfg.get("backend") or "pipeline")
+    timeout = max(60, int(local_cfg.get("timeout_seconds", 7200)))
+    parsed: list[tuple[SourcePart, Path]] = []
+    for index, part in enumerate(parts, 1):
+        output = job / f"local-result-{index}"
+        output.mkdir(parents=True, exist_ok=True)
+        command = [
+            executable,
+            "-p",
+            str(part.path),
+            "-o",
+            str(output),
+            "-b",
+            backend,
+        ]
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+        if completed.returncode != 0:
+            diagnostic = safe_provider_diagnostic(
+                (completed.stderr or completed.stdout)[-2000:]
+            )
+            raise RuntimeError(
+                f"MinerU本地解析失败(exit={completed.returncode}): {diagnostic}"
+            )
+        markdowns = list(output.rglob("full.md"))
+        if len(markdowns) != 1:
+            raise RuntimeError(
+                f"MinerU本地结果必须且只能包含一个full.md: {output}"
+            )
+        parsed.append((part, markdowns[0]))
+    return sorted(parsed, key=lambda pair: pair[0].start_page)
+
+
+def materialize_local_mineru_result(
+    source: Path,
+    digest: str,
+    parsed: list[tuple[SourcePart, Path]],
+    job: Path,
+    final: Path,
+    cfg: dict,
+    metrics: dict,
+) -> None:
+    sections: list[str] = []
+    content_parts: list[dict] = []
+    for part, md_file in parsed:
+        sections.append(
+            repair_images(
+                md_file.read_text("utf-8"),
+                md_file,
+                part.path,
+                job,
+                cfg["ollama"],
+                metrics,
+            )
+        )
+        if cfg["mineru"].get("save_content_json"):
+            for path in md_file.parent.rglob("*content_list.json"):
+                content_parts.append(
+                    {
+                        "file": part.path.name,
+                        "start_page": part.start_page,
+                        "content": json.loads(path.read_text("utf-8")),
+                    }
+                )
+    backend = str((cfg["mineru"].get("local") or {}).get("backend") or "pipeline")
+    metadata = (
+        "---\n"
+        f"source_file: {json.dumps(source.name, ensure_ascii=False)}\n"
+        f"source_sha256: {digest}\n"
+        f"parser: mineru-local-{backend}\n---\n\n"
+    )
+    atomic_write(final, metadata + "\n\n".join(sections))
+    if content_parts:
+        atomic_write(
+            final.with_suffix(".json"),
+            json.dumps(
+                {
+                    "source_file": source.name,
+                    "sha256": digest,
+                    "parts": content_parts,
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+
 def vision_cache_connection() -> sqlite3.Connection:
     """Use one lightweight SQLite reader/writer per image worker thread."""
     db = getattr(VISION_CACHE_LOCAL, "connection", None)
@@ -3127,6 +3348,13 @@ def mimo_batch_descriptions(
 def vision_description(
     prompt: str, image: Path, cfg: dict, metrics: dict
 ) -> str:
+    provider = str(cfg.get("vision_provider") or "auto").casefold()
+    if provider == "ollama":
+        return ollama_description(
+            cfg["vision_model"], prompt, cfg["base_url"], image
+        )
+    if provider == "disabled":
+        raise RuntimeError("图片理解角色已关闭")
     mimo_cfg = cfg.get("mimo") or {}
     fallback = bool(mimo_cfg.get("fallback_to_ollama", False))
     if mimo_cfg.get("enabled", True):
@@ -3322,6 +3550,14 @@ def ocr_image(image: Path, cfg: dict) -> tuple[str, float]:
     if not cfg.get("ocr_enabled", True):
         return "", 0.0
     started = time.perf_counter()
+    if str(cfg.get("ocr_provider") or "rapidocr").casefold() == "ollama":
+        text = ollama_description(
+            str(cfg.get("ocr_model") or cfg.get("vision_model")),
+            "忠实转写图片中可见的全部文字、数字和公式，不解题，不补充说明。",
+            str(cfg["base_url"]),
+            image,
+        )
+        return text, time.perf_counter() - started
     global OCR_ENGINE
     with OCR_ENGINE_LOCK:
         if OCR_ENGINE is None:
@@ -4153,7 +4389,12 @@ def mimo_classification(
             )
         ),
     )
+    provider = str(
+        local_cfg.get("classification_provider") or "auto"
+    ).casefold()
     keys, ordered = ordered_mimo_slots(cfg, classification_attempts)
+    if provider == "ollama":
+        ordered = []
     remote_reachable = False
     names, body = evidence_parts
     allowed_institutions = sorted(set(candidates) | {"未知机构", "不适用"})
@@ -4287,10 +4528,10 @@ def mimo_classification(
             )
         except (requests.RequestException, KeyError, TypeError, ValueError):
             continue
-    fallback_setting = cfg.get(
-        "classification_fallback_to_ollama", "auto"
-    )
-    if str(fallback_setting).casefold() == "auto":
+    fallback_setting = cfg.get("classification_fallback_to_ollama", "auto")
+    if provider == "ollama":
+        use_local_fallback = True
+    elif str(fallback_setting).casefold() == "auto":
         use_local_fallback = not ordered or not remote_reachable
     else:
         use_local_fallback = bool(fallback_setting)
@@ -4431,7 +4672,13 @@ def classify_group(
         group_name, parsed, class_cfg
     )
     result = rule_result
-    if needs_mimo and bool(cfg["ollama"]["mimo"].get("enabled", False)):
+    classification_provider = str(
+        cfg["ollama"].get("classification_provider") or "auto"
+    ).casefold()
+    if needs_mimo and classification_provider != "disabled" and (
+        bool(cfg["ollama"]["mimo"].get("enabled", False))
+        or classification_provider == "ollama"
+    ):
         result = mimo_classification(
             rule_result,
             candidates,
@@ -7448,15 +7695,31 @@ def warm_embedding_model(cfg: dict) -> None:
 
 def preflight(cfg: dict, db: sqlite3.Connection) -> None:
     required: set[str] = set()
-    if cfg["ollama"].get("mimo", {}).get("fallback_to_ollama", False):
+    vision_provider = str(
+        cfg["ollama"].get("vision_provider") or "auto"
+    ).casefold()
+    if vision_provider == "ollama" or cfg["ollama"].get("mimo", {}).get(
+        "fallback_to_ollama", False
+    ):
         required.add(
             cfg["ollama"]["vision_model"]
         )
     classification_fallback = cfg["ollama"].get("mimo", {}).get(
         "classification_fallback_to_ollama", "auto"
     )
-    if str(classification_fallback).casefold() in {"auto", "true", "1", "yes"}:
+    classification_provider = str(
+        cfg["ollama"].get("classification_provider") or "auto"
+    ).casefold()
+    if classification_provider == "ollama" or str(
+        classification_fallback
+    ).casefold() in {"auto", "true", "1", "yes"}:
         required.add(cfg["ollama"]["classification_model"])
+    if (
+        cfg["ollama"].get("ocr_enabled", False)
+        and str(cfg["ollama"].get("ocr_provider") or "rapidocr").casefold()
+        == "ollama"
+    ):
+        required.add(str(cfg["ollama"]["ocr_model"]))
     wc = cfg["weknora"]
     embedding_is_local = wc["models"].get("provider") == "ollama"
     if embedding_is_local:
@@ -7776,6 +8039,38 @@ def process(
                 "parser: direct-text\n---\n\n"
             )
             atomic_write(final, metadata + direct_text.strip() + "\n")
+            save_state(
+                db,
+                digest,
+                source,
+                "indexing",
+                md_path=str(final),
+                metrics=metrics,
+            )
+            can_resume_index = True
+        if (
+            not can_resume_index
+            and str(cfg["mineru"].get("provider") or "cloud").casefold()
+            == "local"
+        ):
+            clean_job(job, cfg["folders"]["work"])
+            # A user may switch an unfinished source from the hosted parser to
+            # local MinerU. Cloud batch identifiers never carry into the local
+            # checkpoint.
+            batch_ids = []
+            metrics["mineru_token_slots"] = ["local"]
+            parts = split_source(source, job, cfg["mineru"])
+            local_started = time.perf_counter()
+            parsed = run_local_mineru(parts, cfg["mineru"], job)
+            metrics["mineru_wait_seconds"] = round(
+                metrics["mineru_wait_seconds"]
+                + time.perf_counter()
+                - local_started,
+                3,
+            )
+            materialize_local_mineru_result(
+                source, digest, parsed, job, final, cfg, metrics
+            )
             save_state(
                 db,
                 digest,
@@ -13310,12 +13605,16 @@ def main() -> None:
                 path for path in files
                 if path.suffix.casefold() not in DIRECT_TEXT
             ]
+            local_parser = (
+                str(cfg["mineru"].get("provider") or "cloud").casefold()
+                == "local"
+            )
             tokens = mineru_tokens()
-            if mineru_files and not tokens:
+            if mineru_files and not tokens and not local_parser:
                 raise SystemExit(
                     "请在.env或mineru-keys.env中至少填写一个MinerU API Key"
                 )
-            token_slots = list(tokens) or ["primary"]
+            token_slots = ["local"] if local_parser else (list(tokens) or ["primary"])
             known_by_path = {
                 row["source_path"]: row
                 for row in db.execute(
@@ -13345,11 +13644,19 @@ def main() -> None:
                     or known["state"] in downstream_states
                 ) and str(known["sha256"] or "").casefold() == current_digest.casefold():
                     continue
-                prequeue_needed.append(path)
+                if not local_parser:
+                    prequeue_needed.append(path)
             print(
-                f"MinerU排队清点：总文件{len(mineru_files)}｜"
-                f"已有批次或后续结果{len(mineru_files) - len(prequeue_needed)}｜"
-                f"本次需提交或重试{len(prequeue_needed)}"
+                (
+                    f"MinerU本地清点：总文件{len(mineru_files)}｜"
+                    "本地解析在处理通道中按需执行"
+                    if local_parser
+                    else (
+                        f"MinerU排队清点：总文件{len(mineru_files)}｜"
+                        f"已有批次或后续结果{len(mineru_files) - len(prequeue_needed)}｜"
+                        f"本次需提交或重试{len(prequeue_needed)}"
+                    )
+                )
             )
             if files and not args.prequeue_only:
                 try:
@@ -13361,8 +13668,12 @@ def main() -> None:
             prequeue_all_mineru(prequeue_needed, cfg, token_slots)
             if args.prequeue_only:
                 print(
-                    "MinerU只排队模式完成；"
-                    "未消费结果、未调用本地模型、未删除源文件"
+                    (
+                        "MinerU本地模式没有云端队列；未执行解析或删除"
+                        if local_parser
+                        else "MinerU只排队模式完成；未消费结果、"
+                        "未调用本地模型、未删除源文件"
+                    )
                 )
                 return
             print(

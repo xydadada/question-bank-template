@@ -1,0 +1,204 @@
+version: 1
+
+# Metadata and official runtime identifiers only. Model weights stay in the
+# selected runtime and are never committed to this repository.
+models:
+  mineru-cloud-vlm:
+    roles: [parser]
+    runtime: mineru-cloud
+    model: vlm
+    local: false
+    description: MinerU hosted VLM parser
+    source_url: https://github.com/opendatalab/MinerU
+  mineru-local-pipeline:
+    roles: [parser]
+    runtime: mineru-local
+    backend: pipeline
+    package: mineru[all]==3.4.4
+    python: "3.12"
+    minimum_ram_gb: 16
+    minimum_disk_gb: 20
+    local: true
+    description: MinerU local CPU-friendly pipeline
+    source_url: https://github.com/opendatalab/MinerU
+  mineru-local-vlm:
+    roles: [parser]
+    runtime: mineru-local
+    backend: vlm-auto-engine
+    package: mineru[all]==3.4.4
+    python: "3.12"
+    minimum_ram_gb: 16
+    minimum_disk_gb: 20
+    minimum_vram_gb: 8
+    local: true
+    description: MinerU local VLM backend for CUDA machines
+    source_url: https://github.com/opendatalab/MinerU
+  rapidocr-local:
+    roles: [ocr]
+    runtime: python-extra
+    extra: ocr
+    local: true
+    description: RapidOCR for inexpensive text-first recovery
+    source_url: https://github.com/RapidAI/RapidOCR
+  qwen3-0.6b:
+    roles: [classification, chat]
+    runtime: ollama
+    model: qwen3:0.6b
+    local: true
+    approximate_download_gb: 0.52
+    description: Small local text model
+    source_url: https://ollama.com/library/qwen3
+  qwen3-1.7b:
+    roles: [classification, chat]
+    runtime: ollama
+    model: qwen3:1.7b
+    local: true
+    description: Small local text model with more capacity
+    source_url: https://ollama.com/library/qwen3
+  qwen3-4b:
+    roles: [classification, chat]
+    runtime: ollama
+    model: qwen3:4b
+    local: true
+    description: Mid-size local text model
+    source_url: https://ollama.com/library/qwen3
+  qwen3-8b:
+    roles: [classification, chat]
+    runtime: ollama
+    model: qwen3:8b
+    local: true
+    description: Larger local text model
+    source_url: https://ollama.com/library/qwen3
+  qwen3.5-0.8b:
+    roles: [vision, classification, chat]
+    runtime: ollama
+    model: qwen3.5:0.8b
+    local: true
+    approximate_download_gb: 1.0
+    description: Very small multimodal model
+    source_url: https://ollama.com/library/qwen3.5
+  qwen3.5-2b:
+    roles: [vision, classification, chat]
+    runtime: ollama
+    model: qwen3.5:2b
+    local: true
+    approximate_download_gb: 2.7
+    description: Balanced small multimodal model
+    source_url: https://ollama.com/library/qwen3.5
+  qwen3.5-4b:
+    roles: [vision, classification, chat]
+    runtime: ollama
+    model: qwen3.5:4b
+    local: true
+    description: Higher-quality local multimodal model
+    source_url: https://ollama.com/library/qwen3.5
+  qwen3.5-9b:
+    roles: [vision, classification, chat]
+    runtime: ollama
+    model: qwen3.5:9b
+    local: true
+    description: Larger multimodal model for higher-memory systems
+    source_url: https://ollama.com/library/qwen3.5
+  qwen3-vl-2b:
+    roles: [vision]
+    runtime: ollama
+    model: qwen3-vl:2b
+    local: true
+    description: Vision-language model for diagrams and page images
+    source_url: https://ollama.com/library/qwen3-vl
+  qwen3-vl-4b:
+    roles: [vision]
+    runtime: ollama
+    model: qwen3-vl:4b
+    local: true
+    description: Larger vision-language option
+    source_url: https://ollama.com/library/qwen3-vl
+  qwen3-vl-8b:
+    roles: [vision]
+    runtime: ollama
+    model: qwen3-vl:8b
+    local: true
+    description: Larger vision-language option for higher-memory systems
+    source_url: https://ollama.com/library/qwen3-vl
+  gemma3-1b:
+    roles: [classification, chat]
+    runtime: ollama
+    model: gemma3:1b
+    local: true
+    description: Compact text-only alternative
+    source_url: https://ollama.com/library/gemma3
+  gemma3-4b:
+    roles: [vision, classification, chat]
+    runtime: ollama
+    model: gemma3:4b
+    local: true
+    description: Mid-size multimodal alternative
+    source_url: https://ollama.com/library/gemma3
+  glm-ocr:
+    roles: [ocr, vision]
+    runtime: ollama
+    model: glm-ocr
+    local: true
+    description: OCR-focused vision model
+    source_url: https://ollama.com/library/glm-ocr
+  qwen3-embedding-0.6b:
+    roles: [embedding]
+    runtime: ollama
+    model: qwen3-embedding:0.6b
+    dimensions: [1024]
+    local: true
+    approximate_download_gb: 0.64
+    description: Default multilingual semantic embedding
+    source_url: https://ollama.com/library/qwen3-embedding
+  qwen3-embedding-4b:
+    roles: [embedding]
+    runtime: ollama
+    model: qwen3-embedding:4b
+    dimensions: [2560]
+    local: true
+    description: Higher-capacity multilingual embedding
+    source_url: https://ollama.com/library/qwen3-embedding
+  qwen3-embedding-8b:
+    roles: [embedding]
+    runtime: ollama
+    model: qwen3-embedding:8b
+    dimensions: [4096]
+    local: true
+    approximate_download_gb: 4.7
+    description: Largest Qwen3 embedding catalog option
+    source_url: https://ollama.com/library/qwen3-embedding
+  bge-m3:
+    roles: [embedding]
+    runtime: ollama
+    model: bge-m3
+    dimensions: [1024]
+    local: true
+    description: Multilingual embedding alternative
+    source_url: https://ollama.com/library/bge-m3
+  embeddinggemma:
+    roles: [embedding]
+    runtime: ollama
+    model: embeddinggemma
+    dimensions: [768]
+    local: true
+    description: Compact embedding model
+    source_url: https://ollama.com/library/embeddinggemma
+  all-minilm:
+    roles: [embedding]
+    runtime: ollama
+    model: all-minilm
+    dimensions: [384]
+    local: true
+    description: Very small embedding model for demos
+    source_url: https://ollama.com/library/all-minilm
+  mimo-v2.5:
+    roles: [vision, classification, chat]
+    runtime: openai-compatible
+    model: mimo-v2.5
+    local: false
+    description: Optional MiMo cloud multimodal provider
+  disabled:
+    roles: [ocr, vision, classification, rerank, chat]
+    runtime: disabled
+    local: true
+    description: Keep the role disabled

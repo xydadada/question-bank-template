@@ -58,7 +58,14 @@ document_classification:
   version: 3
   delete_other_source_after_markdown: false
 
+# 可选。运行 `uv run python model_manager.py select <preset>` 后，程序会从
+# 这个本地文件覆盖下面各处的模型选择；文件不进入Git。
+model_selection:
+  file: models.local.yaml
+
 mineru:
+  # cloud使用MinerU精准解析API；local使用独立安装的官方MinerU CLI。
+  provider: cloud
   base_url: https://mineru.net/api/v4
   model_version: vlm
   language: ch
@@ -69,10 +76,16 @@ mineru:
   consume_round_seconds: 60
   max_mb: 200
   save_content_json: false
+  local:
+    executable: mineru
+    backend: pipeline
+    timeout_seconds: 7200
 
 ollama:
   base_url: http://127.0.0.1:11434
+  vision_provider: mimo
   vision_model: qwen3.5:0.8b
+  classification_provider: mimo
   classification_model: qwen3:0.6b
   classification_context_chars: auto
   classification_keep_alive: auto
@@ -81,6 +94,7 @@ ollama:
   max_image_side: 1600
   # 图片内容默认交给MiMo；如要启用本地OCR，先运行 uv sync --extra ocr。
   ocr_enabled: false
+  ocr_provider: rapidocr
   ocr_min_chars: 12
   mimo:
     enabled: true
