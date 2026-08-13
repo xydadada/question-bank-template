@@ -1,19 +1,19 @@
 # 最小冒烟确认
 
 公开仓库的自动测试会验证语法、安全默认值、可发布文件和 Git 历史，但无法代替
-下载者自己的 MinerU、MiMo、WeKnora 和 Ollama 凭据。首次使用只需用一份可丢弃的
+下载者选择的 MinerU、视觉模型、WeKnora 和 Ollama 运行时。首次使用只需用一份可丢弃的
 小 PDF 确认真实链路，不需要建立大型测试集。
 
 ## 准备
 
 1. 完成 README 的最短安装路径并登录本地 WeKnora。
-2. 运行 `scripts/configure-weknora.ps1`，确认三个知识库 ID 已写入被忽略的
+2. 选择模型预设并执行 `model_manager.py install`；本地模型无需填写云端 Key。
+3. 运行 `scripts/configure-weknora.ps1`，确认三个知识库 ID 已写入被忽略的
    `config.local.yaml`。
-3. 在被忽略的 `.env` 中填写自己的 MinerU Key；需要补图或模型兜底分类时再填写
-   MiMo Key。
-4. 保持 `config.local.yaml` 中全部永久删除选项为 `false`，不要填写
+4. 在被忽略的 `.env` 中只填写所选云端角色需要的 Key。
+5. 保持 `config.local.yaml` 中全部永久删除选项为 `false`，不要填写
    `QUESTION_BANK_ALLOW_PERMANENT_DELETE`。
-5. 只把一份可丢弃、无隐私内容的小 PDF 放入 `inbox`。
+6. 只把一份可丢弃、无隐私内容的小 PDF 放入 `inbox`。
 
 ## 执行
 

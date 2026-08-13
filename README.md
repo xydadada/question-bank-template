@@ -100,8 +100,8 @@ QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC=I_UNDERSTAND
 - Go 1.26+，只用于编译官方 WeKnora CLI
 - [Ollama](https://ollama.com/download)
 - 7-Zip 的 `7z` 命令，仅在处理压缩包时需要
-- 自己的 MinerU API Key
-- 使用图片说明或模型兜底分类时，还需要自己的 MiMo API Key
+- 使用云端 MinerU 时准备自己的 API Key；本地 MinerU 无需 Key
+- 选择 MiMo 图片说明或云端分类时准备自己的 MiMo API Key
 
 默认组合是 Docker Desktop、WSL2 Ubuntu 和 Windows Ollama。使用原生 WSL Docker 时，
 需要另外配置容器到 Ollama 的网络，并为 `host.docker.internal:11434` 设置可达路径。
@@ -124,10 +124,23 @@ powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1 -StartWeKnora
 安装完成后：
 
 1. 打开 <http://127.0.0.1:8088>，创建或登录本地 WeKnora 账户。
-2. 运行 `powershell -File .\scripts\configure-weknora.ps1`，在官方 CLI 中登录。
-3. 从 `.env.example` 复制出 `.env`，填入自己的 MinerU 和 MiMo Key。
-4. 先把少量可丢弃资料放入 `inbox`。
-5. 启动处理。
+2. 用 `model_manager.py select` 选择本地、混合或云端预设，再按需安装。
+3. 运行 `powershell -File .\scripts\configure-weknora.ps1`，在官方 CLI 中登录；
+   脚本会读取模型选择并绑定 Embedding 与可选 Chat 模型。
+4. 从 `.env.example` 复制出 `.env`，只填写所选云端角色需要的 Key。
+5. 先把少量可丢弃资料放入 `inbox`，再启动处理。
+
+解析、OCR、图片理解、分类、Embedding 和文本模型均可按角色选择本地或云端
+实现。模型选择与按需下载见[本地与云端模型](docs/LOCAL_MODELS.md)：
+
+```powershell
+uv run python model_manager.py list
+uv run python model_manager.py select local-light
+uv run python model_manager.py install
+```
+
+选择动作不会立即下载；`install` 只安装当前预设实际使用的本地组件。跳过选择
+文件时继续使用 `config.local.yaml` 的兼容配置。
 
 ```powershell
 powershell -File .\scripts\start.ps1 -Processing

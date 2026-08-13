@@ -51,8 +51,40 @@ $EnvPath = Join-Path $Root ".env"
 $EnvText = if (Test-Path $EnvPath) { [IO.File]::ReadAllText($EnvPath, [Text.Encoding]::UTF8) } else { "" }
 $HasMineru = $EnvText -match '(?m)^MINERU_API_TOKEN(?:_[A-Z0-9]+)?\s*=\s*[^\s#]+\s*$'
 $HasMimo = $EnvText -match '(?m)^MIMO_API_KEY(?:_[0-9]+)?\s*=\s*[^\s#]+\s*$'
-if ($HasMineru) { Write-Host "[OK] at least one MinerU key is present (value hidden)" } else { Write-Host "[WARN] no MinerU key detected; ingestion is unavailable, but existing knowledge-base retrieval can still work" }
-if ($HasMimo) { Write-Host "[OK] at least one MiMo key is present (value hidden)" } else { Write-Host "[WARN] no MiMo key detected; image understanding will be unavailable" }
+$ParserRuntime = "mineru-cloud"
+$VisionRuntime = "openai-compatible"
+$Selection = Join-Path $Root "models.local.yaml"
+if ((Test-Path $Selection) -and (Get-Command uv -ErrorAction SilentlyContinue)) {
+    $ResolvedRaw = (& uv run python model_manager.py resolve 2>$null) -join "`n"
+    if ($LASTEXITCODE -eq 0) {
+        $Resolved = $ResolvedRaw | ConvertFrom-Json
+        $ParserRuntime = [string]$Resolved.roles.parser.runtime
+        $VisionRuntime = [string]$Resolved.roles.vision.runtime
+        Write-Host "[OK] model preset resolved: $($Resolved.name)"
+    } else {
+        $Failures.Add("models.local.yaml could not be resolved")
+    }
+}
+if ($ParserRuntime -eq "mineru-local") {
+    $LocalMineru = @(
+        (Join-Path $Root ".runtime\mineru\Scripts\mineru.exe"),
+        (Join-Path $Root ".runtime\mineru\bin\mineru")
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($LocalMineru) {
+        Write-Host "[OK] local MinerU runtime is installed"
+    } else {
+        Write-Host "[WARN] local MinerU is selected but not installed; run model_manager.py install"
+    }
+} elseif ($HasMineru) {
+    Write-Host "[OK] at least one MinerU key is present (value hidden)"
+} else {
+    Write-Host "[WARN] cloud MinerU is selected without a key; existing knowledge-base retrieval can still work"
+}
+if ($VisionRuntime -eq "openai-compatible") {
+    if ($HasMimo) { Write-Host "[OK] at least one MiMo key is present (value hidden)" } else { Write-Host "[WARN] MiMo vision is selected without a key" }
+} else {
+    Write-Host "[OK] vision role does not require a MiMo key"
+}
 
 if ($Failures.Count) {
     throw "Doctor found $($Failures.Count) blocking problem(s)."

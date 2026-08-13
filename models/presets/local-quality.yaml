@@ -1,0 +1,11 @@
+name: local-quality
+description: Larger local models for systems with more GPU memory
+roles:
+  parser: mineru-local-vlm
+  ocr: rapidocr-local
+  vision: qwen3.5-4b
+  classification: qwen3-1.7b
+  embedding: qwen3-embedding-4b
+  rerank: disabled
+  chat: qwen3-8b
+embedding_dimension: 2560

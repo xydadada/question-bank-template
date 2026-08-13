@@ -1,0 +1,11 @@
+name: local-light
+description: Small downloads and conservative memory use
+roles:
+  parser: mineru-local-pipeline
+  ocr: rapidocr-local
+  vision: qwen3.5-0.8b
+  classification: qwen3-0.6b
+  embedding: qwen3-embedding-0.6b
+  rerank: disabled
+  chat: qwen3.5-2b
+embedding_dimension: 1024

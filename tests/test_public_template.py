@@ -39,6 +39,163 @@ def publishable_files() -> list[Path]:
 
 
 class PublicTemplateTests(unittest.TestCase):
+    def test_model_catalog_presets_only_bind_compatible_roles(self) -> None:
+        import model_manager
+
+        entries = model_manager.catalog()
+        available = model_manager.presets()
+        self.assertGreaterEqual(len(available), 4)
+        for selection in available.values():
+            model_manager.validate_selection(selection, entries)
+        self.assertEqual(
+            entries["qwen3-embedding-4b"]["dimensions"], [2560]
+        )
+        self.assertNotIn(ROOT / "models.local.yaml", publishable_files())
+
+    def test_model_selection_overlays_existing_runtime_configuration(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            selection = Path(temporary) / "models.local.yaml"
+            selection.write_text(
+                (ROOT / "models" / "presets" / "local-light.yaml").read_text(
+                    "utf-8"
+                ),
+                encoding="utf-8",
+            )
+            cfg = {
+                "model_selection": {"file": str(selection)},
+                "mineru": {"model_version": "vlm"},
+                "ollama": {"mimo": {}},
+                "weknora": {"models": {}},
+            }
+            resolved = ingest.apply_model_selection(cfg)
+        self.assertEqual(resolved["mineru"]["provider"], "local")
+        self.assertEqual(resolved["mineru"]["local"]["backend"], "pipeline")
+        self.assertEqual(resolved["ollama"]["vision_provider"], "ollama")
+        self.assertEqual(resolved["ollama"]["vision_model"], "qwen3.5:0.8b")
+        self.assertEqual(
+            resolved["weknora"]["models"]["embedding"],
+            "qwen3-embedding:0.6b",
+        )
+        self.assertEqual(
+            resolved["weknora"]["models"]["embedding_dimension"], 1024
+        )
+
+    def test_user_model_catalog_can_replace_one_role_without_downloading(self) -> None:
+        import model_manager
+
+        with tempfile.TemporaryDirectory() as temporary:
+            local_selection = Path(temporary) / "models.local.yaml"
+            local_catalog = Path(temporary) / "models.catalog.local.yaml"
+            with mock.patch.object(
+                model_manager, "LOCAL_SELECTION", local_selection
+            ), mock.patch.object(model_manager, "LOCAL_CATALOG", local_catalog):
+                model_manager.command_select("local-light")
+                model_manager.command_add(
+                    "custom-vision",
+                    ["vision"],
+                    "ollama",
+                    "vendor/vision:tag",
+                    [],
+                )
+                model_manager.command_set("vision", "custom-vision", None)
+                resolved = model_manager.resolved_selection(
+                    model_manager.selected_config(None)
+                )
+            self.assertEqual(
+                resolved["roles"]["vision"]["model"], "vendor/vision:tag"
+            )
+            self.assertTrue(local_selection.is_file())
+            self.assertTrue(local_catalog.is_file())
+
+    def test_use_ollama_selects_known_or_custom_tags(self) -> None:
+        import model_manager
+
+        with tempfile.TemporaryDirectory() as temporary:
+            local_selection = Path(temporary) / "models.local.yaml"
+            local_catalog = Path(temporary) / "models.catalog.local.yaml"
+            local_selection.write_text(
+                (ROOT / "models" / "presets" / "local-light.yaml").read_text(
+                    "utf-8"
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                model_manager, "LOCAL_SELECTION", local_selection
+            ), mock.patch.object(model_manager, "LOCAL_CATALOG", local_catalog):
+                model_manager.command_use_ollama(
+                    "vision", "qwen3-vl:2b", None, None
+                )
+                selected = yaml.safe_load(local_selection.read_text("utf-8"))
+                self.assertEqual(selected["roles"]["vision"], "qwen3-vl-2b")
+                self.assertFalse(local_catalog.exists())
+
+                with self.assertRaisesRegex(RuntimeError, "不能用于vision"):
+                    model_manager.command_use_ollama(
+                        "vision", "gemma3:1b", None, None
+                    )
+
+                model_manager.command_use_ollama(
+                    "vision", "vendor/new-vlm:latest", None, None
+                )
+                selected = yaml.safe_load(local_selection.read_text("utf-8"))
+                self.assertEqual(
+                    selected["roles"]["vision"],
+                    "custom-vendor-new-vlm-latest",
+                )
+                local = yaml.safe_load(local_catalog.read_text("utf-8"))
+                self.assertEqual(
+                    local["models"]["custom-vendor-new-vlm-latest"]["model"],
+                    "vendor/new-vlm:latest",
+                )
+
+                with self.assertRaisesRegex(RuntimeError, "--dimension"):
+                    model_manager.command_use_ollama(
+                        "embedding", "vendor/new-embed:latest", None, None
+                    )
+
+                model_manager.command_use_ollama(
+                    "embedding", "qwen3-embedding:4b", None, None
+                )
+                selected = yaml.safe_load(local_selection.read_text("utf-8"))
+                self.assertEqual(
+                    selected["roles"]["embedding"], "qwen3-embedding-4b"
+                )
+                self.assertEqual(selected["embedding_dimension"], 2560)
+
+    def test_local_mineru_uses_official_cli_and_requires_one_result(self) -> None:
+        import ingest
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "sample.pdf"
+            source.write_bytes(b"placeholder")
+            part = ingest.SourcePart(source, 0)
+
+            def fake_run(command, **kwargs):
+                output = Path(command[command.index("-o") + 1])
+                result = output / "sample" / "auto"
+                result.mkdir(parents=True)
+                (result / "full.md").write_text("# parsed", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            cfg = {
+                "local": {
+                    "executable": "mineru",
+                    "backend": "pipeline",
+                    "timeout_seconds": 120,
+                }
+            }
+            with mock.patch.object(
+                ingest, "local_mineru_executable", return_value="mineru"
+            ), mock.patch.object(ingest.subprocess, "run", side_effect=fake_run) as run:
+                result = ingest.run_local_mineru([part], cfg, root / "work")
+            command = run.call_args.args[0]
+            self.assertIn("-p", command)
+            self.assertEqual(command[command.index("-b") + 1], "pipeline")
+            self.assertEqual(result[0][1].read_text("utf-8"), "# parsed")
+
     def test_ingest_parses(self) -> None:
         ast.parse((ROOT / "ingest.py").read_text("utf-8"))
 

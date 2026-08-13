@@ -1,0 +1,11 @@
+name: cloud
+description: Existing MinerU and MiMo cloud path with local embedding
+roles:
+  parser: mineru-cloud-vlm
+  ocr: disabled
+  vision: mimo-v2.5
+  classification: mimo-v2.5
+  embedding: qwen3-embedding-0.6b
+  rerank: disabled
+  chat: disabled
+embedding_dimension: 1024

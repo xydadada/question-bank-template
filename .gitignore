@@ -6,6 +6,8 @@
 mineru-keys.env
 mimo-keys.env
 config.local.yaml
+models.local.yaml
+models.catalog.local.yaml
 profiles/*.local.yaml
 mcp-public/secrets/
 mcp-public/data/
