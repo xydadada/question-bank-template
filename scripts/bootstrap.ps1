@@ -12,6 +12,20 @@ $Runtime = Join-Path $Root ".runtime"
 $WeKnora = Join-Path $Runtime "WeKnora"
 $Bin = Join-Path $Root "bin"
 $WeKnoraExpectedCommit = "c64a48647cd6f7eb8b0fb020b2e8fec74ee375fb"
+$CliPath = Join-Path $Bin "weknora.exe"
+$CliHashPath = Join-Path $Bin "weknora.sha256"
+$UsePrebuiltCli = $false
+if ((Test-Path -LiteralPath $CliPath) -and (Test-Path -LiteralPath $CliHashPath)) {
+    $Parts = ((Get-Content -Raw -LiteralPath $CliHashPath).Trim() -split '\s+')
+    if ($Parts.Count -ne 2 -or $Parts[1] -ne $WeKnoraExpectedCommit) {
+        throw 'Bundled WeKnora CLI manifest does not match the pinned source release.'
+    }
+    $ActualCliHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $CliPath).Hash.ToLowerInvariant()
+    if ($ActualCliHash -ne $Parts[0].ToLowerInvariant()) {
+        throw 'Bundled WeKnora CLI hash check failed. Download the release package again.'
+    }
+    $UsePrebuiltCli = $true
+}
 
 function Require-Command([string]$Name, [string]$InstallUrl) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
@@ -44,18 +58,20 @@ function Set-DotEnvValue([string]$Path, [string]$Name, [string]$Value) {
 }
 
 Require-Command git "https://git-scm.com/download/win"
-Require-Command go "https://go.dev/dl/"
+if (-not $UsePrebuiltCli) { Require-Command go "https://go.dev/dl/" }
 Require-Command uv "https://docs.astral.sh/uv/getting-started/installation/"
 Require-Command wsl.exe "https://learn.microsoft.com/windows/wsl/install"
 
-$GoVersionText = (& go version) -join " "
-if ($GoVersionText -notmatch 'go(\d+)\.(\d+)') {
-    throw "Unable to read the installed Go version."
-}
-$GoMajor = [int]$Matches[1]
-$GoMinor = [int]$Matches[2]
-if ($GoMajor -lt 1 -or ($GoMajor -eq 1 -and $GoMinor -lt 26)) {
-    throw "WeKnora CLI requires Go 1.26 or newer. Found: $GoVersionText"
+if (-not $UsePrebuiltCli) {
+    $GoVersionText = (& go version) -join " "
+    if ($GoVersionText -notmatch 'go(\d+)\.(\d+)') {
+        throw "Unable to read the installed Go version."
+    }
+    $GoMajor = [int]$Matches[1]
+    $GoMinor = [int]$Matches[2]
+    if ($GoMajor -lt 1 -or ($GoMajor -eq 1 -and $GoMinor -lt 26)) {
+        throw "WeKnora CLI requires Go 1.26 or newer. Found: $GoVersionText"
+    }
 }
 
 New-Item -ItemType Directory -Force -Path $Runtime, $Bin | Out-Null
@@ -95,16 +111,18 @@ if ($ActualWeKnoraCommit -ne $WeKnoraExpectedCommit) {
     throw "WeKnora source mismatch. Expected $WeKnoraExpectedCommit for $WeKnoraVersion, found $ActualWeKnoraCommit. Remove .runtime/WeKnora manually before retrying."
 }
 
-Push-Location (Join-Path $WeKnora "cli")
-try {
-    $WeKnoraCommit = ((& git -C $WeKnora rev-parse --short=12 HEAD) -join "").Trim()
-    $BuildDate = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
-    $BuildPackage = "github.com/Tencent/WeKnora/cli/internal/build"
-    $LdFlags = "-s -w -X $BuildPackage.Version=$WeKnoraVersion -X $BuildPackage.Commit=$WeKnoraCommit -X $BuildPackage.Date=$BuildDate"
-    & go build -trimpath "-ldflags=$LdFlags" -o (Join-Path $Bin "weknora.exe") .
-    if ($LASTEXITCODE -ne 0) { throw "WeKnora CLI build failed." }
-} finally {
-    Pop-Location
+if (-not $UsePrebuiltCli) {
+    Push-Location (Join-Path $WeKnora "cli")
+    try {
+        $WeKnoraCommit = ((& git -C $WeKnora rev-parse --short=12 HEAD) -join "").Trim()
+        $BuildDate = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+        $BuildPackage = "github.com/Tencent/WeKnora/cli/internal/build"
+        $LdFlags = "-s -w -X $BuildPackage.Version=$WeKnoraVersion -X $BuildPackage.Commit=$WeKnoraCommit -X $BuildPackage.Date=$BuildDate"
+        & go build -trimpath "-ldflags=$LdFlags" -o $CliPath .
+        if ($LASTEXITCODE -ne 0) { throw "WeKnora CLI build failed." }
+    } finally {
+        Pop-Location
+    }
 }
 
 if ($InstallMcpTools) {

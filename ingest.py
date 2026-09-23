@@ -1538,14 +1538,17 @@ def part_data_id(part: SourcePart) -> str:
 
 
 def mineru_tokens() -> dict[str, str]:
+    file_values = dotenv_values(ROOT / "mineru-keys.env")
+
+    def value(name: str) -> str:
+        return str(file_values.get(name) or os.getenv(name, "")).strip()
+
     tokens = {
-        "primary": os.getenv("MINERU_API_TOKEN", "").strip(),
-        "backup": os.getenv("MINERU_API_TOKEN_BACKUP", "").strip(),
+        "primary": value("MINERU_API_TOKEN"),
+        "backup": value("MINERU_API_TOKEN_BACKUP"),
     }
     for index in range(3, 33):
-        tokens[f"key{index:02d}"] = os.getenv(
-            f"MINERU_API_TOKEN_{index}", ""
-        ).strip()
+        tokens[f"key{index:02d}"] = value(f"MINERU_API_TOKEN_{index}")
     return {slot: token for slot, token in tokens.items() if token}
 
 
@@ -4153,7 +4156,11 @@ def mimo_classification(
             )
         ),
     )
-    keys, ordered = ordered_mimo_slots(cfg, classification_attempts)
+    keys, ordered = (
+        ordered_mimo_slots(cfg, classification_attempts)
+        if cfg.get("enabled", True)
+        else ({}, [])
+    )
     remote_reachable = False
     names, body = evidence_parts
     allowed_institutions = sorted(set(candidates) | {"未知机构", "不适用"})
@@ -4431,7 +4438,11 @@ def classify_group(
         group_name, parsed, class_cfg
     )
     result = rule_result
-    if needs_mimo and bool(cfg["ollama"]["mimo"].get("enabled", False)):
+    mimo_cfg = cfg["ollama"]["mimo"]
+    if needs_mimo and (
+        bool(mimo_cfg.get("enabled", False))
+        or mimo_cfg.get("classification_fallback_to_ollama") is True
+    ):
         result = mimo_classification(
             rule_result,
             candidates,

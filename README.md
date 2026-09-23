@@ -108,6 +108,12 @@ QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC=I_UNDERSTAND
 
 ## 最短安装路径
 
+面向首次使用的 Windows 向导入口是 **`启动题库设置.cmd`**。从 GitHub 下载并解压后，双击它，按“环境 → 解析密钥 → 模型与知识库 → 导入资料 → ChatGPT连接”的顺序操作。向导复用下面的脚本，并在需要登录 WeKnora、Cloudflare 时打开相应步骤窗口。密钥在向导中输入，保存在本机被 Git 忽略的 `mineru-keys.env` 和 `mimo-keys.env`；处理进程可以读取后来增加的密钥。
+
+向量模型可选择 `qwen3-embedding:0.6b`、`bge-m3` 或 `nomic-embed-text`；题图可选择 MiMo 云端或 Ollama 本地视觉模型。模型在选择后才下载。向导会测试 Embedding 的实际输出维度，配置成功后写入本地知识库设置。已有知识库更换向量模型时，配置脚本会停下并要求明确迁移索引。
+
+目前向导仍需要先安装 Windows 系统组件（WSL2、Docker Desktop、Git、uv 和 Ollama）；从 GitHub 的源码 ZIP 安装还需要 Go，带预编译 CLI 的 Windows 发布包则省去 Go。各自账号仍需登录 MinerU、WeKnora、Cloudflare 与 ChatGPT。没有域名时，资料入库和本地检索仍可先用。详细步骤见[首次设置指南](docs/FIRST_RUN.md)。
+
 先运行 `scripts/doctor.ps1` 可以检查当前克隆是否已经具备检索或处理条件。首次安装仍
 从引导脚本开始：
 

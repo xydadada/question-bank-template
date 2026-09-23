@@ -1,5 +1,7 @@
 # Architecture
 
+The first-run entry point is `启动题库设置.cmd` → `scripts/wizard.ps1`. The wizard collects local configuration and calls the existing bootstrap, WeKnora setup, model selection, input staging, lifecycle, and MCP scripts. `ingest.py` remains responsible for document processing; WeKnora, Ollama, and the official MCP components retain their respective roles.
+
 The template keeps orchestration separate from user data and upstream systems:
 
 ```text
