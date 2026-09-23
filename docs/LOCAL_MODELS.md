@@ -11,12 +11,16 @@
 | `ocr` | 图片文字的低成本转写 | RapidOCR / Ollama OCR 模型 / 关闭 |
 | `vision` | 题图、几何图、电路图和实验图说明 | Ollama VLM / MiMo |
 | `classification` | 规则无法确定时分类资料 | Ollama 文本模型 / MiMo |
-| `embedding` | WeKnora 向量化与查询 | Ollama / WeKnora 支持的远端模型 |
+| `embedding` | WeKnora 向量化与查询 | 本模板向导支持本地 Ollama |
 | `rerank` | 候选重排 | 默认关闭；可使用 WeKnora 支持的远端模型 |
 | `chat` | Wiki、图谱或本地问答候选 | Ollama / 云端；基础检索可关闭 |
 
 Rerank 保持独立角色。Ollama 模型目录中的生成模型和 Embedding 模型不能自动
 当作 Reranker 使用；目录只允许把模型放入它声明支持的角色。
+
+当前向导与配置脚本只配置本地 Ollama Embedding。WeKnora 上游可能支持其他
+提供商，但本模板尚未把远端 Embedding 接入模型选择、建库和一致性检查；
+“云端”预设仍在本机运行 Embedding。
 
 ## 选择和按需安装
 

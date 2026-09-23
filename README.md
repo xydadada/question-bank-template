@@ -24,7 +24,7 @@
 
 ## 下载并部署（Windows，推荐）
 
-1. [直接下载 Windows v0.3.1 ZIP](https://github.com/xydadada/question-bank-template/releases/download/v0.3.1/question-bank-template-windows-v0.3.1.zip)，或打开 [Releases](https://github.com/xydadada/question-bank-template/releases/latest) 在 **Assets** 中选择 Windows 发布包。GitHub 自动生成的 **Source code (zip)** 不含预编译 WeKnora CLI，需要另装 Go 编译。
+1. [直接下载 Windows v0.3.2 ZIP](https://github.com/xydadada/question-bank-template/releases/download/v0.3.2/question-bank-template-windows-v0.3.2.zip)，或打开 [Releases](https://github.com/xydadada/question-bank-template/releases/latest) 在 **Assets** 中选择 Windows 发布包。GitHub 自动生成的 **Source code (zip)** 不含预编译 WeKnora CLI，需要另装 Go 编译。
 2. 将 ZIP 完整解压到自己可写的目录，再双击根目录的 **`启动题库设置.cmd`**。不要直接在压缩包预览窗口中运行。向导会依次显示“环境 → 解析密钥 → 模型与知识库 → 导入资料 → ChatGPT连接”。
 3. 先在“环境”页检查并补齐 WSL2 Ubuntu、Docker Desktop、Git、uv、Ollama 等依赖，再点“安装并启动基础服务”。在浏览器中创建自己的 WeKnora 账号。
 4. 选择云端 MinerU 时，向导会打开其 Token 页面；选择本地解析则不需要 MinerU Key。选择模型组合后，**只下载所选本地组件**，再配置三个知识库。先导入一份可丢弃的小资料，确认真实检索有结果。
@@ -130,11 +130,11 @@ QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC=I_UNDERSTAND
 
 上面的 Release + 向导是首次部署的推荐入口。下面保留给需要自行调用脚本或从源码安装的使用者。向导复用这些脚本，并在需要登录 WeKnora、Cloudflare 时打开相应步骤窗口。密钥在向导中输入，保存在本机被 Git 忽略的 `mineru-keys.env` 和 `mimo-keys.env`；处理进程可以读取后来增加的密钥。
 
-向导提供五套本地、混合、云端组合；文档解析、Embedding、题图理解和疑难分类也能单独选择。可选其他 Ollama 标签，按选择下载模型。配置知识库前会测试 Embedding 的实际输出维度。已有知识库更换向量模型时，配置脚本会停下并要求明确迁移索引。完整目录见[本地与云端模型](docs/LOCAL_MODELS.md)。
+向导提供五套本地、混合、云端组合；文档解析、Embedding、题图理解和疑难分类也能单独选择。当前 Embedding 选项使用本地 Ollama；可选其他 Ollama 标签，按选择下载模型。配置知识库前会测试 Embedding 的实际输出维度，并从 WeKnora 侧测试模型调用。已有知识库更换向量模型时，配置脚本会停下并要求明确迁移索引。完整目录见[本地与云端模型](docs/LOCAL_MODELS.md)。
 
 目前向导仍需要先安装 Windows 系统组件（WSL2、Docker Desktop、Git、uv 和 Ollama）；从 GitHub 的源码 ZIP 安装还需要 Go，带预编译 CLI 的 Windows 发布包则省去 Go。各自账号仍需登录 MinerU、WeKnora、Cloudflare 与 ChatGPT。没有域名时，资料入库和本地检索仍可先用。详细步骤见[首次设置指南](docs/FIRST_RUN.md)。
 
-先运行 `scripts/doctor.ps1` 可以检查当前克隆是否已经具备检索或处理条件。首次安装仍
+首次安装可用 `scripts/doctor.ps1 -PrerequisitesOnly` 检查系统依赖；安装建库后运行 `scripts/doctor.ps1` 检查当前克隆是否具备检索或处理条件。首次安装仍
 从引导脚本开始：
 
 ```powershell

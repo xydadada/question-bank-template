@@ -25,6 +25,8 @@ if (Test-Path $ModelSelection) {
     if ($Resolved.roles.embedding.runtime -eq "ollama") {
         $EmbeddingModel = [string]$Resolved.roles.embedding.model
         $EmbeddingDimension = [int]$Resolved.embedding_dimension
+    } else {
+        throw "The setup wizard currently supports Ollama Embedding only. Select a local Embedding model before configuring WeKnora."
     }
     if ($Resolved.roles.chat.runtime -eq "ollama") {
         $ChatModel = [string]$Resolved.roles.chat.model
@@ -123,6 +125,34 @@ if (-not $ExistingModel) {
     $EmbeddingModelId = [string]$ExistingModel.id
 }
 if (-not $EmbeddingModelId) { throw "Embedding model ID could not be determined." }
+
+# The Windows-side Ollama probe above checks output dimensions, but indexing
+# uses WeKnora's container-to-host route. Exercise that route before creating
+# any knowledge base so a broken Docker/Ollama bridge fails at setup time.
+$EmbeddingProbeBody = @{
+    "modelId" = $EmbeddingModelId
+    "modelName" = $EmbeddingModel
+    "source" = "local"
+    "provider" = "ollama"
+    "baseUrl" = ""
+    "dimension" = $EmbeddingDimension
+    "supportsDimensionOverride" = $true
+} | ConvertTo-Json -Compress
+try {
+    $EmbeddingProbe = Run-Json @(
+        "api", "/api/v1/initialization/embedding/test",
+        "-d", $EmbeddingProbeBody,
+        "--format", "json", "--profile", $Profile
+    )
+    $EmbeddingProbeResult = $EmbeddingProbe.data.data
+    if (-not $EmbeddingProbeResult) { $EmbeddingProbeResult = $EmbeddingProbe.data }
+    if (-not $EmbeddingProbeResult.available -or [int]$EmbeddingProbeResult.dimension -ne $EmbeddingDimension) {
+        throw "WeKnora reported embedding unavailable or an unexpected dimension."
+    }
+} catch {
+    throw "WeKnora cannot use the selected Embedding model through its own container-to-host route. Check Ollama and host.docker.internal:11434, then retry. No knowledge base was created."
+}
+Write-Host "WeKnora Embedding route verified before knowledge-base setup."
 
 $ChatModelId = ""
 if ($ChatModel) {

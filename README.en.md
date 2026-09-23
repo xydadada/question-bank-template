@@ -29,7 +29,7 @@ database.
 
 ## Download and set up on Windows
 
-1. [Download the Windows v0.3.1 ZIP directly](https://github.com/xydadada/question-bank-template/releases/download/v0.3.1/question-bank-template-windows-v0.3.1.zip), or open [Releases](https://github.com/xydadada/question-bank-template/releases/latest) and choose the Windows asset. GitHub's automatically generated **Source code (zip)** is different: it lacks the prebuilt WeKnora CLI and requires Go to compile it.
+1. [Download the Windows v0.3.2 ZIP directly](https://github.com/xydadada/question-bank-template/releases/download/v0.3.2/question-bank-template-windows-v0.3.2.zip), or open [Releases](https://github.com/xydadada/question-bank-template/releases/latest) and choose the Windows asset. GitHub's automatically generated **Source code (zip)** is different: it lacks the prebuilt WeKnora CLI and requires Go to compile it.
 2. Extract the entire archive into a writable folder. Double-click **`启动题库设置.cmd`** in that folder; do not launch it from an archive preview. Follow the tabs in order: environment, credentials, models and knowledge bases, documents, and optional ChatGPT connection.
 3. Install or check WSL2 Ubuntu, Docker Desktop, Git, uv, and Ollama. The wizard then starts the base services. Sign in to your own WeKnora instance, choose a parser and model roles, download only the selected local components, and create the three knowledge bases.
 4. Import one disposable document and confirm it can actually be retrieved. For ChatGPT access, additionally set up your own Cloudflare domain, limited WeKnora retrieval key, OAuth password, and MCP connection in the **ChatGPT Workspace that will use it**.
@@ -146,7 +146,7 @@ route for `host.docker.internal:11434` in that setup.
 
 The Release ZIP and wizard above are the recommended first-installation path. The commands below are for people installing from source or operating the components directly. The source ZIP requires Go to build the pinned WeKnora CLI.
 
-`scripts/doctor.ps1` checks whether an existing clone is ready for retrieval or ingestion.
+`scripts/doctor.ps1 -PrerequisitesOnly` checks system dependencies before setup. After setup, `scripts/doctor.ps1` checks whether the clone is ready for retrieval or ingestion.
 For a first installation, start with the bootstrap script:
 
 ```powershell
