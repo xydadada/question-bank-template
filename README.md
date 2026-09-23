@@ -97,11 +97,11 @@ QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC=I_UNDERSTAND
 - Git for Windows
 - Python 3.11+，项目环境由 `uv` 管理
 - [uv](https://docs.astral.sh/uv/)
-- Go 1.26+，只用于编译官方 WeKnora CLI
+- Go 1.26+，仅源码安装时编译官方 WeKnora CLI
 - [Ollama](https://ollama.com/download)
 - 7-Zip 的 `7z` 命令，仅在处理压缩包时需要
-- 自己的 MinerU API Key
-- 使用图片说明或模型兜底分类时，还需要自己的 MiMo API Key
+- 使用云端 MinerU 时准备自己的 API Key；本地 MinerU 无需 Key
+- 选择 MiMo 图片说明或云端分类时准备自己的 MiMo API Key
 
 默认组合是 Docker Desktop、WSL2 Ubuntu 和 Windows Ollama。使用原生 WSL Docker 时，
 需要另外配置容器到 Ollama 的网络，并为 `host.docker.internal:11434` 设置可达路径。
@@ -110,7 +110,7 @@ QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC=I_UNDERSTAND
 
 面向首次使用的 Windows 向导入口是 **`启动题库设置.cmd`**。从 GitHub 下载并解压后，双击它，按“环境 → 解析密钥 → 模型与知识库 → 导入资料 → ChatGPT连接”的顺序操作。向导复用下面的脚本，并在需要登录 WeKnora、Cloudflare 时打开相应步骤窗口。密钥在向导中输入，保存在本机被 Git 忽略的 `mineru-keys.env` 和 `mimo-keys.env`；处理进程可以读取后来增加的密钥。
 
-向量模型可选择 `qwen3-embedding:0.6b`、`bge-m3` 或 `nomic-embed-text`；题图可选择 MiMo 云端或 Ollama 本地视觉模型。模型在选择后才下载。向导会测试 Embedding 的实际输出维度，配置成功后写入本地知识库设置。已有知识库更换向量模型时，配置脚本会停下并要求明确迁移索引。
+向导提供五套本地、混合、云端组合；文档解析、Embedding、题图理解和疑难分类也能单独选择。可选其他 Ollama 标签，按选择下载模型。配置知识库前会测试 Embedding 的实际输出维度。已有知识库更换向量模型时，配置脚本会停下并要求明确迁移索引。完整目录见[本地与云端模型](docs/LOCAL_MODELS.md)。
 
 目前向导仍需要先安装 Windows 系统组件（WSL2、Docker Desktop、Git、uv 和 Ollama）；从 GitHub 的源码 ZIP 安装还需要 Go，带预编译 CLI 的 Windows 发布包则省去 Go。各自账号仍需登录 MinerU、WeKnora、Cloudflare 与 ChatGPT。没有域名时，资料入库和本地检索仍可先用。详细步骤见[首次设置指南](docs/FIRST_RUN.md)。
 
@@ -130,10 +130,23 @@ powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1 -StartWeKnora
 安装完成后：
 
 1. 打开 <http://127.0.0.1:8088>，创建或登录本地 WeKnora 账户。
-2. 运行 `powershell -File .\scripts\configure-weknora.ps1`，在官方 CLI 中登录。
-3. 从 `.env.example` 复制出 `.env`，填入自己的 MinerU 和 MiMo Key。
-4. 先把少量可丢弃资料放入 `inbox`。
-5. 启动处理。
+2. 用 `model_manager.py select` 选择本地、混合或云端预设，再按需安装。
+3. 运行 `powershell -File .\scripts\configure-weknora.ps1`，在官方 CLI 中登录；
+   脚本会读取模型选择并绑定 Embedding 与可选 Chat 模型。
+4. 从 `.env.example` 复制出 `.env`，只填写所选云端角色需要的 Key。
+5. 先把少量可丢弃资料放入 `inbox`，再启动处理。
+
+解析、OCR、图片理解、分类、Embedding 和文本模型均可按角色选择本地或云端
+实现。模型选择与按需下载见[本地与云端模型](docs/LOCAL_MODELS.md)：
+
+```powershell
+uv run python model_manager.py list
+uv run python model_manager.py select local-light
+uv run python model_manager.py install
+```
+
+选择动作不会立即下载；`install` 只安装当前预设实际使用的本地组件。跳过选择
+文件时继续使用 `config.local.yaml` 的兼容配置。
 
 ```powershell
 powershell -File .\scripts\start.ps1 -Processing

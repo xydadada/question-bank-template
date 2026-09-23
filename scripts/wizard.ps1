@@ -176,40 +176,72 @@ New-Label $Page '以后增加密钥，选择下一个编号即可。界面不会
 
 # Models
 $Page = $Tabs.TabPages[2]
-New-Label $Page '先选择向量模型。程序会按需下载、测量实际向量维度，再创建三个知识库。已有资料的知识库不能直接换向量模型。' 24 24 720 60 | Out-Null
-$Embedding = [Windows.Forms.ComboBox]::new()
-$Embedding.DropDownStyle = 'DropDownList'
-$Embedding.Items.AddRange(@('qwen3-embedding:0.6b  (1024维)', 'bge-m3  (1024维)', 'nomic-embed-text  (768维)'))
-$Embedding.SelectedIndex = 0
-$Embedding.Location = [Drawing.Point]::new(25, 100)
-$Embedding.Size = [Drawing.Size]::new(420, 30)
-$Page.Controls.Add($Embedding)
-$Configure = New-Button $Page '下载并配置向量模型与知识库' 25 145 330
-$Configure.Add_Click({
+New-Label $Page '先选一个组合，再按需要覆盖各项。只下载实际选中的本地组件；已有资料的知识库换向量模型需重建索引。' 24 17 720 45 | Out-Null
+function New-ModelChoice($Parent, [string]$Caption, [int]$Y, [string[]]$Options) {
+    New-Label $Parent $Caption 25 $Y 135 28 | Out-Null
+    $Control = [Windows.Forms.ComboBox]::new()
+    $Control.DropDownStyle = 'DropDownList'
+    $Control.Items.AddRange($Options)
+    $Control.SelectedIndex = 0
+    $Control.Location = [Drawing.Point]::new(160, $Y)
+    $Control.Size = [Drawing.Size]::new(500, 30)
+    $Parent.Controls.Add($Control)
+    return $Control
+}
+$Preset = New-ModelChoice $Page '组合' 66 @('cloud 云端解析与题图', 'hybrid 云端解析＋本地题图', 'local-light 轻量本地', 'local-balanced 本地视觉解析', 'local-quality 高配本地')
+$Parser = New-ModelChoice $Page '文档解析' 113 @('跟随组合', 'MinerU 云端', 'MinerU 本地 pipeline', 'MinerU 本地 VLM')
+$Embedding = New-ModelChoice $Page '向量模型' 160 @('跟随组合', 'Qwen3 0.6B｜1024维', 'Qwen3 4B｜2560维', 'BGE-M3｜1024维', 'EmbeddingGemma｜768维', 'all-minilm｜384维')
+$Vision = New-ModelChoice $Page '题图理解' 207 @('跟随组合', 'MiMo 云端', 'Qwen3.5 0.8B 本地', 'Qwen3.5 2B 本地', 'Qwen3.5 4B 本地', 'Qwen3-VL 2B 本地')
+$Classification = New-ModelChoice $Page '疑难分类' 254 @('跟随组合', 'MiMo 云端', 'Qwen3 0.6B 本地', 'Qwen3 1.7B 本地', '关闭')
+$SelectModels = New-Button $Page '按选择下载组件' 25 308 235
+$SelectModels.Add_Click({
     try {
-        $Models = @(@('qwen3-embedding:0.6b', '1024'), @('bge-m3', '1024'), @('nomic-embed-text', '768'))
-        $Selected = $Models[$Embedding.SelectedIndex]
-        Launch-Script 'scripts\configure-weknora.ps1' @('-EmbeddingModel', $Selected[0], '-EmbeddingDimension', $Selected[1])
+        $PresetIds = @('cloud', 'hybrid', 'local-light', 'local-balanced', 'local-quality')
+        $ParserIds = @('', 'mineru-cloud-vlm', 'mineru-local-pipeline', 'mineru-local-vlm')
+        $EmbeddingIds = @('', 'qwen3-embedding-0.6b', 'qwen3-embedding-4b', 'bge-m3', 'embeddinggemma', 'all-minilm')
+        $EmbeddingDims = @(0, 1024, 2560, 1024, 768, 384)
+        $VisionIds = @('', 'mimo-v2.5', 'qwen3.5-0.8b', 'qwen3.5-2b', 'qwen3.5-4b', 'qwen3-vl-2b')
+        $ClassIds = @('', 'mimo-v2.5', 'qwen3-0.6b', 'qwen3-1.7b', 'disabled')
+        Launch-Script 'scripts\setup-model-selection.ps1' @(
+            '-Preset', $PresetIds[$Preset.SelectedIndex],
+            '-Parser', $ParserIds[$Parser.SelectedIndex],
+            '-Embedding', $EmbeddingIds[$Embedding.SelectedIndex],
+            '-EmbeddingDimension', ([string]$EmbeddingDims[$Embedding.SelectedIndex]),
+            '-Vision', $VisionIds[$Vision.SelectedIndex],
+            '-Classification', $ClassIds[$Classification.SelectedIndex]
+        )
     } catch { Fail($_.Exception.Message) }
 })
-New-Label $Page '题图理解' 25 215 120 27 | Out-Null
-$Vision = [Windows.Forms.ComboBox]::new()
-$Vision.DropDownStyle = 'DropDownList'
-$Vision.Items.AddRange(@('MiMo 云端（需密钥）', 'Ollama 本地 qwen3.5:0.8b', 'Ollama 本地 qwen3.5:2b'))
-$Vision.SelectedIndex = 0
-$Vision.Location = [Drawing.Point]::new(25, 251)
-$Vision.Size = [Drawing.Size]::new(420, 30)
-$Page.Controls.Add($Vision)
-$SetVision = New-Button $Page '应用题图模型选择' 25 298 250
-$SetVision.Add_Click({
-    try {
-        if ($Vision.SelectedIndex -eq 0) {
-            Launch-Script 'scripts\set-vision.ps1' @('-Provider', 'mimo')
-        } else {
-            $Name = if ($Vision.SelectedIndex -eq 1) { 'qwen3.5:0.8b' } else { 'qwen3.5:2b' }
-            Launch-Script 'scripts\set-vision.ps1' @('-Provider', 'ollama', '-VisionModel', $Name)
-        }
-    } catch { Fail($_.Exception.Message) }
+$Configure = New-Button $Page '配置 WeKnora 三个知识库' 275 308 255
+$Configure.Add_Click({ try { Launch-Script 'scripts\configure-weknora.ps1' } catch { Fail($_.Exception.Message) } })
+$CustomModels = New-Button $Page '添加其他 Ollama 模型' 25 364 250
+$CustomModels.Add_Click({
+    $Custom = [Windows.Forms.Form]::new()
+    $Custom.Text = '选择其他 Ollama 模型'
+    $Custom.Size = [Drawing.Size]::new(510, 275)
+    $Custom.StartPosition = 'CenterParent'
+    $Custom.Font = $Form.Font
+    New-Label $Custom '用途：ocr / vision / classification / embedding / chat' 15 15 465 25 | Out-Null
+    $RoleBox = New-TextBox $Custom 15 45 155
+    New-Label $Custom 'Ollama 模型标签，例如 vendor/model:tag' 185 47 300 25 | Out-Null
+    $ModelBox = New-TextBox $Custom 185 74 285
+    New-Label $Custom 'Embedding 的实际输出维度（其他用途留空）' 15 110 465 25 | Out-Null
+    $DimensionBox = New-TextBox $Custom 15 138 155
+    $ApplyCustom = New-Button $Custom '选择并下载' 15 180 190
+    $ApplyCustom.Add_Click({
+        try {
+            $Dim = 0
+            if ($DimensionBox.Text.Trim() -and -not [int]::TryParse($DimensionBox.Text.Trim(), [ref]$Dim)) {
+                throw '请输入整数维度。'
+            }
+            Launch-Script 'scripts\select-custom-model.ps1' @(
+                '-Role', $RoleBox.Text.Trim(), '-Model', $ModelBox.Text.Trim(),
+                '-Dimension', ([string]$Dim)
+            )
+            $Custom.Close()
+        } catch { Fail($_.Exception.Message) }
+    })
+    [void]$Custom.ShowDialog($Form)
 })
 
 # Import

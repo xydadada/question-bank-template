@@ -1,0 +1,11 @@
+name: hybrid
+description: Cloud parsing with local recovery, embedding, and retrieval
+roles:
+  parser: mineru-cloud-vlm
+  ocr: rapidocr-local
+  vision: qwen3.5-2b
+  classification: qwen3-0.6b
+  embedding: qwen3-embedding-0.6b
+  rerank: disabled
+  chat: disabled
+embedding_dimension: 1024
