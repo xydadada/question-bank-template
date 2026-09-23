@@ -1,0 +1,11 @@
+name: local-balanced
+description: Local CUDA parser and stronger image understanding
+roles:
+  parser: mineru-local-vlm
+  ocr: rapidocr-local
+  vision: qwen3.5-2b
+  classification: qwen3-0.6b
+  embedding: qwen3-embedding-0.6b
+  rerank: disabled
+  chat: qwen3.5-4b
+embedding_dimension: 1024

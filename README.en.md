@@ -113,17 +113,19 @@ data and leave every deletion option set to `false`. Follow the
 - Git for Windows
 - Python 3.11 or newer, with the project environment managed by `uv`
 - [uv](https://docs.astral.sh/uv/)
-- Go 1.26 or newer, used only to build the official WeKnora CLI
+- Go 1.26 or newer when installing from source; the Windows release ZIP includes the verified CLI
 - [Ollama](https://ollama.com/download)
 - the `7z` command from 7-Zip, needed only for archive input
-- your own MinerU API key
-- your own MiMo API key when figure descriptions or model-assisted classification are used
+- your own MinerU API key when using the hosted parser; local MinerU needs no key
+- your own MiMo API key only when MiMo is selected for vision or classification
 
 The documented setup uses Docker Desktop, WSL2 Ubuntu, and Ollama on Windows. Native Docker
 inside WSL can work when container access to Ollama is configured separately. Set a reachable
 route for `host.docker.internal:11434` in that setup.
 
 ## Shortest installation path
+
+For a guided Windows setup, download the Windows ZIP from Releases, extract it, and double-click `启动题库设置.cmd`. The wizard covers prerequisites, your own MinerU/MiMo keys, model presets and on-demand downloads, importing documents, and the optional ChatGPT MCP connection. See the [first-run guide](docs/FIRST_RUN.md). The source ZIP follows the command-line path below and requires Go to build the pinned WeKnora CLI.
 
 `scripts/doctor.ps1` checks whether an existing clone is ready for retrieval or ingestion.
 For a first installation, start with the bootstrap script:
@@ -143,11 +145,20 @@ commit.
 After bootstrap:
 
 1. Open <http://127.0.0.1:8088> and create or sign in to a local WeKnora account.
-2. Run `powershell -File .\scripts\configure-weknora.ps1` and sign in through the official
-   CLI.
-3. Copy `.env.example` to `.env` and add your MinerU and MiMo keys.
-4. Put a few disposable files in `inbox`.
-5. Start processing.
+2. Select a local, hybrid, or cloud preset with `model_manager.py select`, then install it.
+3. Run `powershell -File .\scripts\configure-weknora.ps1` and sign in through the official
+   CLI. The script binds the selected embedding and optional chat model.
+4. Copy `.env.example` to `.env` and add only the keys required by selected cloud roles.
+5. Put a few disposable files in `inbox`, then start processing.
+
+Parsing, OCR, vision, classification, embedding, and text generation are selectable roles.
+See [local and cloud models](docs/LOCAL_MODELS.md) for presets and on-demand downloads:
+
+```powershell
+uv run python model_manager.py list
+uv run python model_manager.py select local-light
+uv run python model_manager.py install
+```
 
 ```powershell
 powershell -File .\scripts\start.ps1 -Processing
