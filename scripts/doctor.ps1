@@ -1,3 +1,5 @@
+param([switch]$PrerequisitesOnly)
+
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $Failures = [Collections.Generic.List[string]]::new()
@@ -17,6 +19,17 @@ if ($HasGo) {
     Write-Host "[OK] existing WeKnora CLI can run; Go is only needed to rebuild it"
 } else {
     $Failures.Add("go missing and WeKnora CLI has not been built; run bootstrap after installing Go")
+}
+if ($PrerequisitesOnly) {
+    Check ([bool](Get-Command "docker" -ErrorAction SilentlyContinue)) "docker available in PATH" "docker missing from PATH"
+    if (Get-Command "ollama" -ErrorAction SilentlyContinue) {
+        Write-Host "[OK] ollama CLI available in PATH"
+    } else {
+        Write-Host "[WARN] ollama CLI is not in PATH; the model installer uses Ollama's local API, so check it before selecting a model"
+    }
+    if ($Failures.Count) { throw "Prerequisite check found $($Failures.Count) missing item(s)." }
+    Write-Host "System prerequisites are available. This has not checked account setup, running services, or retrieval."
+    return
 }
 Check (Test-Path (Join-Path $Root ".env")) ".env exists" ".env missing; run bootstrap"
 $Config = Join-Path $Root "config.local.yaml"

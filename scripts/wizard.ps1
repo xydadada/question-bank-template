@@ -137,11 +137,13 @@ $Form.Controls.Add($Status)
 # Environment
 $Page = $Tabs.TabPages[0]
 New-Label $Page '首次安装需要 Windows 11、WSL2 Ubuntu、Docker Desktop、Git、uv 和 Ollama。源码包另需 Go；Windows Release 已附带 CLI。' 24 28 710 65 | Out-Null
-$Check = New-Button $Page '检查当前环境' 25 105
-$Check.Add_Click({ try { Launch-Script 'scripts\doctor.ps1' } catch { Fail($_.Exception.Message) } })
-$Install = New-Button $Page '安装并启动基础服务' 250 105 240
+$Check = New-Button $Page '检查系统依赖' 25 105
+$Check.Add_Click({ try { Launch-Script 'scripts\doctor.ps1' @('-PrerequisitesOnly') } catch { Fail($_.Exception.Message) } })
+$FullCheck = New-Button $Page '检查完整配置' 250 105
+$FullCheck.Add_Click({ try { Launch-Script 'scripts\doctor.ps1' } catch { Fail($_.Exception.Message) } })
+$Install = New-Button $Page '安装并启动基础服务' 25 166 240
 $Install.Add_Click({ try { Launch-Script 'scripts\bootstrap.ps1' @('-StartWeKnora') } catch { Fail($_.Exception.Message) } })
-$OpenWeKnora = New-Button $Page '打开 WeKnora 登录页' 25 166 240
+$OpenWeKnora = New-Button $Page '打开 WeKnora 登录页' 285 166 240
 $OpenWeKnora.Add_Click({ Open-Web 'http://127.0.0.1:8088' })
 New-Label $Page '首次登录时在 WeKnora 创建自己的账号。安装脚本只创建本机运行环境，不带任何题库内容。' 25 220 710 60 | Out-Null
 $DownloadLinks = New-Button $Page '打开官方下载入口' 25 290 235

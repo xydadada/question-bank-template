@@ -1621,6 +1621,30 @@ class PublicTemplateTests(unittest.TestCase):
         )
         self.assertNotIn("(?m)^  profile:", script)
 
+    def test_weknora_embedding_route_is_probed_before_knowledge_bases(self) -> None:
+        script = (ROOT / "scripts" / "configure-weknora.ps1").read_text("utf-8")
+        self.assertIn("supports Ollama Embedding only", script)
+        self.assertIn('"/api/v1/initialization/embedding/test"', script)
+        self.assertIn('"modelId"', script)
+        self.assertIn('"supportsDimensionOverride"', script)
+        self.assertLess(
+            script.index('"/api/v1/initialization/embedding/test"'),
+            script.index('$ParentId = Ensure-KnowledgeBase'),
+        )
+
+    def test_wizard_separates_prerequisites_from_full_doctor(self) -> None:
+        wizard = (ROOT / "scripts" / "wizard.ps1").read_text("utf-8-sig")
+        doctor = (ROOT / "scripts" / "doctor.ps1").read_text("utf-8")
+        self.assertIn("'检查系统依赖'", wizard)
+        self.assertIn("'检查完整配置'", wizard)
+        self.assertIn("'scripts\\doctor.ps1' @('-PrerequisitesOnly')", wizard)
+        self.assertIn("param([switch]$PrerequisitesOnly)", doctor)
+        self.assertLess(doctor.index("if ($PrerequisitesOnly)"), doctor.index('Check (Test-Path (Join-Path $Root ".env"))'))
+
+    def test_embedding_documentation_matches_setup_capability(self) -> None:
+        guide = (ROOT / "docs" / "LOCAL_MODELS.md").read_text("utf-8")
+        self.assertIn("当前向导与配置脚本只配置本地 Ollama Embedding", guide)
+
     def test_doctor_allows_retrieval_without_build_tools_or_provider_keys(self) -> None:
         script = (ROOT / "scripts" / "doctor.ps1").read_text("utf-8")
         self.assertIn("existing knowledge-base retrieval can still work", script)

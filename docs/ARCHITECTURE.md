@@ -2,6 +2,8 @@
 
 The first-run entry point is `启动题库设置.cmd` → `scripts/wizard.ps1`. The wizard collects local configuration and calls the existing bootstrap, WeKnora setup, model selection, input staging, lifecycle, and MCP scripts. `ingest.py` remains responsible for document processing; WeKnora, Ollama, and the official MCP components retain their respective roles.
 
+The wizard has separate checks for command prerequisites and completed runtime configuration. During WeKnora setup, the local Ollama Embedding dimension is checked first; then WeKnora calls that model through its configured route before any of the three knowledge bases are created. This setup path currently accepts Ollama Embedding only.
+
 The template keeps orchestration separate from user data and upstream systems:
 
 ```text
