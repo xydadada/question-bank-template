@@ -27,6 +27,25 @@ database.
 > MinerU, MiMo, WeKnora, and ChatGPT happens in the user's environment. Start with a
 > disposable file and keep every permanent-deletion setting at `false`.
 
+## Download and set up on Windows
+
+1. [Download the Windows v0.3.1 ZIP directly](https://github.com/xydadada/question-bank-template/releases/download/v0.3.1/question-bank-template-windows-v0.3.1.zip), or open [Releases](https://github.com/xydadada/question-bank-template/releases/latest) and choose the Windows asset. GitHub's automatically generated **Source code (zip)** is different: it lacks the prebuilt WeKnora CLI and requires Go to compile it.
+2. Extract the entire archive into a writable folder. Double-click **`启动题库设置.cmd`** in that folder; do not launch it from an archive preview. Follow the tabs in order: environment, credentials, models and knowledge bases, documents, and optional ChatGPT connection.
+3. Install or check WSL2 Ubuntu, Docker Desktop, Git, uv, and Ollama. The wizard then starts the base services. Sign in to your own WeKnora instance, choose a parser and model roles, download only the selected local components, and create the three knowledge bases.
+4. Import one disposable document and confirm it can actually be retrieved. For ChatGPT access, additionally set up your own Cloudflare domain, limited WeKnora retrieval key, OAuth password, and MCP connection in the **ChatGPT Workspace that will use it**.
+
+The wizard's “官方页面” (official pages) tab has direct buttons for system dependencies, MinerU, MiMo, Cloudflare Tunnel, and ChatGPT Plugins. The relevant setup tabs also link to those pages. Opening a page does not sign in, purchase, or authorize on someone's behalf.
+
+The ZIP contains neither model weights nor a corpus, accounts, domains, or credentials. It still needs the system prerequisites and first-time downloads. See the [first-run guide](docs/FIRST_RUN.md) and [MCP guide](docs/CHATGPT_MCP.md).
+
+### Let a local AI agent help
+
+After extracting the Release ZIP, open your local AI agent in that folder and give it this request:
+
+> Read `README.en.md`, `docs/FIRST_RUN.md`, and `docs/DEPLOY_WITH_AI.md`, then set up this template on my Windows computer. Check and reuse suitable existing prerequisites without changing unrelated projects or data. Use the extracted Windows Release and `启动题库设置.cmd`. Ask me only when account login, secret entry, administrator access, domain/DNS changes, or ChatGPT Workspace authorization is needed. Never put secrets in chat, logs, or Git; leave permanent deletion disabled. Validate one disposable document with real retrieval from all three knowledge bases, and, if configured, a real ChatGPT MCP search. Report what was verified and what remains.
+
+The [agent deployment checklist](docs/DEPLOY_WITH_AI.md) is currently in Chinese but can be read by multilingual agents.
+
 ![Pipeline from source files to three retrieval layers](assets/pipeline.png)
 
 ## What it does
@@ -123,9 +142,9 @@ The documented setup uses Docker Desktop, WSL2 Ubuntu, and Ollama on Windows. Na
 inside WSL can work when container access to Ollama is configured separately. Set a reachable
 route for `host.docker.internal:11434` in that setup.
 
-## Shortest installation path
+## Command-line installation and daily operations
 
-For a guided Windows setup, download the Windows ZIP from Releases, extract it, and double-click `启动题库设置.cmd`. The wizard covers prerequisites, your own MinerU/MiMo keys, model presets and on-demand downloads, importing documents, and the optional ChatGPT MCP connection. See the [first-run guide](docs/FIRST_RUN.md). The source ZIP follows the command-line path below and requires Go to build the pinned WeKnora CLI.
+The Release ZIP and wizard above are the recommended first-installation path. The commands below are for people installing from source or operating the components directly. The source ZIP requires Go to build the pinned WeKnora CLI.
 
 `scripts/doctor.ps1` checks whether an existing clone is ready for retrieval or ingestion.
 For a first installation, start with the bootstrap script:

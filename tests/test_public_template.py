@@ -1730,6 +1730,23 @@ class PublicTemplateTests(unittest.TestCase):
         )
         self.assertNotIn("启用实时访问或索引搜索", documentation)
 
+    def test_first_run_wizard_opens_official_setup_pages(self) -> None:
+        wizard = (ROOT / "scripts" / "wizard.ps1").read_text("utf-8")
+        for url in (
+            "https://mineru.net/apiManage/token",
+            "https://platform.xiaomimimo.com/",
+            "https://dash.cloudflare.com/?to=/:account/tunnels",
+            "https://chatgpt.com/plugins",
+            "https://developers.openai.com/plugins/deploy/connect-chatgpt",
+        ):
+            self.assertIn(url, wizard)
+        self.assertIn("官方页面", wizard)
+        self.assertIn("New-LinkButton", wizard)
+        readme = (ROOT / "README.md").read_text("utf-8")
+        self.assertIn("docs/DEPLOY_WITH_AI.md", readme)
+        self.assertIn("releases/download/", readme)
+        self.assertIn("question-bank-template-windows-", readme)
+
     def test_workflow_actions_are_immutable(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "audit.yml").read_text("utf-8")
         uses = re.findall(r"(?m)^\s*uses:\s*\S+@([^\s#]+)", workflow)

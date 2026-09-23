@@ -22,6 +22,26 @@
 > 失败恢复。MinerU、MiMo、WeKnora 和 ChatGPT 账号需要在实际环境中确认。第一次请
 > 使用可丢弃的小文件，并将所有永久删除开关保持为 `false`。
 
+## 下载并部署（Windows，推荐）
+
+1. [直接下载 Windows v0.3.1 ZIP](https://github.com/xydadada/question-bank-template/releases/download/v0.3.1/question-bank-template-windows-v0.3.1.zip)，或打开 [Releases](https://github.com/xydadada/question-bank-template/releases/latest) 在 **Assets** 中选择 Windows 发布包。GitHub 自动生成的 **Source code (zip)** 不含预编译 WeKnora CLI，需要另装 Go 编译。
+2. 将 ZIP 完整解压到自己可写的目录，再双击根目录的 **`启动题库设置.cmd`**。不要直接在压缩包预览窗口中运行。向导会依次显示“环境 → 解析密钥 → 模型与知识库 → 导入资料 → ChatGPT连接”。
+3. 先在“环境”页检查并补齐 WSL2 Ubuntu、Docker Desktop、Git、uv、Ollama 等依赖，再点“安装并启动基础服务”。在浏览器中创建自己的 WeKnora 账号。
+4. 选择云端 MinerU 时，向导会打开其 Token 页面；选择本地解析则不需要 MinerU Key。选择模型组合后，**只下载所选本地组件**，再配置三个知识库。先导入一份可丢弃的小资料，确认真实检索有结果。
+5. 需要让 ChatGPT 访问时，再配置自己的 Cloudflare 域名、只读 WeKnora Key、OAuth 密码，并在**实际使用的 ChatGPT Workspace** 中添加 MCP 地址及授权。只做本地检索可以先跳过这一步。
+
+向导的“官方页面”页内置了系统依赖、MinerU、MiMo、Cloudflare Tunnel 和 ChatGPT 插件页的按钮；相关步骤页也有直接入口。点击只会打开网页，登录、购买和授权由账号持有人决定。
+
+首次安装仍会下载外部依赖，也需要使用者自己的账号和必要的登录；发布包不含题库内容、模型权重或密钥。详细操作见 [Windows 首次设置](docs/FIRST_RUN.md)，连接前的权限检查见 [ChatGPT MCP](docs/CHATGPT_MCP.md)。
+
+### 让本机 AI agent 帮你部署
+
+把发布包解压后，在那个目录中打开你的本机 AI agent，把下面这段话发给它：
+
+> 请阅读本仓库的 `README.md`、`docs/FIRST_RUN.md` 和 `docs/DEPLOY_WITH_AI.md`，按文档在这台电脑上部署。先检查环境，复用已有的合适组件，不碰无关项目和资料。优先使用已解压的 Windows Release 和 `启动题库设置.cmd`。需要我登录、填写密钥或密码、授予管理员权限、修改域名或 DNS 时再让我操作；不要把秘密写进聊天、日志或 Git。保持永久删除关闭。先用可丢弃的小文件完成一次真实三层检索；若配置了 ChatGPT，再验证它能实际调用检索工具。最后告诉我哪些步骤已验证、哪些还需我完成。
+
+给 agent 的逐步检查点和停止条件见 [AI 辅助部署说明](docs/DEPLOY_WITH_AI.md)。
+
 ![从源文件到三层检索的处理流程](assets/pipeline.png)
 
 ## 它实际做什么
@@ -106,9 +126,9 @@ QUESTION_BANK_ALLOW_MANUAL_DELETION_SYNC=I_UNDERSTAND
 默认组合是 Docker Desktop、WSL2 Ubuntu 和 Windows Ollama。使用原生 WSL Docker 时，
 需要另外配置容器到 Ollama 的网络，并为 `host.docker.internal:11434` 设置可达路径。
 
-## 最短安装路径
+## 命令行安装与日常操作
 
-面向首次使用的 Windows 向导入口是 **`启动题库设置.cmd`**。从 GitHub 下载并解压后，双击它，按“环境 → 解析密钥 → 模型与知识库 → 导入资料 → ChatGPT连接”的顺序操作。向导复用下面的脚本，并在需要登录 WeKnora、Cloudflare 时打开相应步骤窗口。密钥在向导中输入，保存在本机被 Git 忽略的 `mineru-keys.env` 和 `mimo-keys.env`；处理进程可以读取后来增加的密钥。
+上面的 Release + 向导是首次部署的推荐入口。下面保留给需要自行调用脚本或从源码安装的使用者。向导复用这些脚本，并在需要登录 WeKnora、Cloudflare 时打开相应步骤窗口。密钥在向导中输入，保存在本机被 Git 忽略的 `mineru-keys.env` 和 `mimo-keys.env`；处理进程可以读取后来增加的密钥。
 
 向导提供五套本地、混合、云端组合；文档解析、Embedding、题图理解和疑难分类也能单独选择。可选其他 Ollama 标签，按选择下载模型。配置知识库前会测试 Embedding 的实际输出维度。已有知识库更换向量模型时，配置脚本会停下并要求明确迁移索引。完整目录见[本地与云端模型](docs/LOCAL_MODELS.md)。
 
