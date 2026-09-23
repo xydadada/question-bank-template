@@ -39,6 +39,8 @@ Key 交给官方 CLI 的凭据机制，不写入仓库、参数、脚本或日�
 
 ## 创建 Tunnel
 
+向导“ChatGPT连接”页的“打开 Cloudflare Tunnel 控制台”会进入下载者自己的 Cloudflare 账号；“官方页面”页也有同一入口。下面的命令会创建本地管理的 Tunnel，使用前先确认主机名属于自己的域名。控制台网页只用于查看账号与 Tunnel，不能代替本机命令及 OAuth 配置。
+
 ```powershell
 powershell -File .\mcp-public\setup-cloudflare.ps1 `
   -Hostname mcp.your-domain.example -CreateDnsRoute
@@ -78,6 +80,8 @@ Profile 重新执行 CLI doctor、确认父块、子块和原文三个已配置�
 
 确认公网 `https://mcp.your-domain.example/healthz` 可达后，在实际使用的 ChatGPT
 Workspace 中连接 MCP：
+
+向导的“打开 ChatGPT 插件页”会直接打开 `https://chatgpt.com/plugins`。需要先登录实际使用的账号和 Workspace；按钮本身不会安装应用或授予权限。
 
 1. 在 ChatGPT 设置的 **Security and login** 中启用 Developer mode；该开关是否可见取决于账号和 Workspace 策略。
 2. 打开 **ChatGPT Plugins** 页面，选择加号，填写名称和描述。

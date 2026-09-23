@@ -102,6 +102,16 @@ function Launch-Script([string]$RelativePath, [string[]]$Arguments = @()) {
 
 function Open-Web([string]$Url) { Start-Process $Url | Out-Null }
 
+function New-LinkButton($Parent, [string]$Text, [string]$Url, [int]$X, [int]$Y, [int]$Width = 210) {
+    $Button = New-Button $Parent $Text $X $Y $Width
+    $Button.Tag = $Url
+    $Button.Add_Click({
+        param($Sender, $EventArgs)
+        try { Open-Web ([string]$Sender.Tag) } catch { Fail($_.Exception.Message) }
+    })
+    return $Button
+}
+
 $Form = [Windows.Forms.Form]::new()
 $Form.Text = '题库首次设置与运行'
 $Form.Size = [Drawing.Size]::new(820, 630)
@@ -113,7 +123,7 @@ $Tabs = [Windows.Forms.TabControl]::new()
 $Tabs.Location = [Drawing.Point]::new(18, 18)
 $Tabs.Size = [Drawing.Size]::new(770, 490)
 $Form.Controls.Add($Tabs)
-foreach ($Name in @('1 环境', '2 解析密钥', '3 模型与知识库', '4 导入资料', '5 ChatGPT连接')) {
+foreach ($Name in @('1 环境', '2 解析密钥', '3 模型与知识库', '4 导入资料', '5 ChatGPT连接', '官方页面')) {
     $Page = [Windows.Forms.TabPage]::new()
     $Page.Text = $Name
     $Tabs.TabPages.Add($Page)
@@ -121,12 +131,12 @@ foreach ($Name in @('1 环境', '2 解析密钥', '3 模型与知识库', '4 导
 $Status = [Windows.Forms.Label]::new()
 $Status.Location = [Drawing.Point]::new(25, 522)
 $Status.Size = [Drawing.Size]::new(755, 55)
-$Status.Text = '从左到右完成首次设置。每一步的执行结果会在单独窗口中显示。'
+$Status.Text = '按前五页完成首次设置；“官方页面”可随时打开下载与账号入口。每一步结果会在单独窗口中显示。'
 $Form.Controls.Add($Status)
 
 # Environment
 $Page = $Tabs.TabPages[0]
-New-Label $Page '首次安装需要 Windows 11、WSL2 Ubuntu、Docker Desktop、Git、Go、uv 和 Ollama。安装脚本会检查这些依赖。' 24 28 710 65 | Out-Null
+New-Label $Page '首次安装需要 Windows 11、WSL2 Ubuntu、Docker Desktop、Git、uv 和 Ollama。源码包另需 Go；Windows Release 已附带 CLI。' 24 28 710 65 | Out-Null
 $Check = New-Button $Page '检查当前环境' 25 105
 $Check.Add_Click({ try { Launch-Script 'scripts\doctor.ps1' } catch { Fail($_.Exception.Message) } })
 $Install = New-Button $Page '安装并启动基础服务' 250 105 240
@@ -134,12 +144,15 @@ $Install.Add_Click({ try { Launch-Script 'scripts\bootstrap.ps1' @('-StartWeKnor
 $OpenWeKnora = New-Button $Page '打开 WeKnora 登录页' 25 166 240
 $OpenWeKnora.Add_Click({ Open-Web 'http://127.0.0.1:8088' })
 New-Label $Page '首次登录时在 WeKnora 创建自己的账号。安装脚本只创建本机运行环境，不带任何题库内容。' 25 220 710 60 | Out-Null
+$DownloadLinks = New-Button $Page '打开官方下载入口' 25 290 235
+$DownloadLinks.Add_Click({ $Tabs.SelectedIndex = 5 })
 
 # Credentials
 $Page = $Tabs.TabPages[1]
-New-Label $Page 'PDF 等文档解析使用你自己的 MinerU 密钥。图片理解可选 MiMo 云端或本地 Ollama。密钥只保存在本机 .env。' 24 25 710 65 | Out-Null
+New-Label $Page '云端解析使用你自己的 MinerU 密钥；图片理解可选 MiMo 或本地 Ollama。向导把密钥保存到本机私有的 *-keys.env。' 24 25 710 65 | Out-Null
 $GetMinerU = New-Button $Page '打开 MinerU 获取密钥' 25 105 260
 $GetMinerU.Add_Click({ Open-Web 'https://mineru.net/apiManage/token' })
+New-LinkButton $Page '打开 MiMo API 控制台' 'https://platform.xiaomimimo.com/' 300 105 260 | Out-Null
 New-Label $Page '服务' 25 172 80 27 | Out-Null
 $KeyProvider = [Windows.Forms.ComboBox]::new()
 $KeyProvider.DropDownStyle = 'DropDownList'
@@ -288,6 +301,7 @@ $ReadOnly = New-Button $Page '设置只读检索密钥' 315 84 240
 $ReadOnly.Add_Click({ try { Launch-Script 'mcp-public\configure-readonly-profile.ps1' } catch { Fail($_.Exception.Message) } })
 $Password = New-Button $Page '设置连接密码' 25 140 220
 $Password.Add_Click({ try { Launch-Script 'mcp-public\set-password.ps1' } catch { Fail($_.Exception.Message) } })
+New-LinkButton $Page '打开 Cloudflare Tunnel 控制台' 'https://dash.cloudflare.com/?to=/:account/tunnels' 260 140 315 | Out-Null
 New-Label $Page 'Cloudflare 主机名，例如 mcp.example.com' 25 206 470 28 | Out-Null
 $Hostname = New-TextBox $Page 25 239 420
 $SetupTunnel = New-Button $Page '创建并连接 Tunnel' 25 287 245
@@ -312,9 +326,27 @@ $StartMcp.Add_Click({
 })
 $TestMcp = New-Button $Page '检测本地 MCP' 475 287 210
 $TestMcp.Add_Click({ try { Launch-Script 'mcp-public\test-local.ps1' } catch { Fail($_.Exception.Message) } })
-$ChatGpt = New-Button $Page '打开 ChatGPT' 25 351 285
-$ChatGpt.Add_Click({ Open-Web 'https://chatgpt.com/' })
+New-LinkButton $Page '打开 ChatGPT 插件页' 'https://chatgpt.com/plugins' 25 351 285 | Out-Null
+New-LinkButton $Page '查看连接操作说明' 'https://developers.openai.com/plugins/deploy/connect-chatgpt' 325 351 265 | Out-Null
 New-Label $Page '在实际使用的 Workspace 添加 https://你的主机名/mcp，选择 OAuth 并授权。' 25 399 710 36 | Out-Null
+
+# Official download and account pages. Links may require login; they do not configure accounts.
+$Page = $Tabs.TabPages[5]
+New-Label $Page '这里仅打开官方页面。安装、注册、付款、授权和 DNS 修改都由使用者确认；本项目不会代替你登录。' 24 20 710 55 | Out-Null
+New-LinkButton $Page 'WSL2 Ubuntu 安装说明' 'https://learn.microsoft.com/windows/wsl/install' 25 85 320 | Out-Null
+New-LinkButton $Page 'Docker Desktop 下载' 'https://www.docker.com/products/docker-desktop/' 375 85 320 | Out-Null
+New-LinkButton $Page 'Git for Windows 下载' 'https://git-scm.com/download/win' 25 138 320 | Out-Null
+New-LinkButton $Page 'uv 安装说明' 'https://docs.astral.sh/uv/getting-started/installation/' 375 138 320 | Out-Null
+New-LinkButton $Page 'Ollama 下载' 'https://ollama.com/download' 25 191 320 | Out-Null
+New-LinkButton $Page '7-Zip 下载（压缩包可选）' 'https://www.7-zip.org/' 375 191 320 | Out-Null
+New-LinkButton $Page 'MinerU Token' 'https://mineru.net/apiManage/token' 25 244 320 | Out-Null
+New-LinkButton $Page 'MiMo API 控制台' 'https://platform.xiaomimimo.com/' 375 244 320 | Out-Null
+New-LinkButton $Page 'Cloudflare Tunnel 控制台' 'https://dash.cloudflare.com/?to=/:account/tunnels' 25 297 320 | Out-Null
+New-LinkButton $Page 'ChatGPT 插件页' 'https://chatgpt.com/plugins' 375 297 320 | Out-Null
+New-LinkButton $Page 'Cloudflare Tunnel 官方说明' 'https://developers.cloudflare.com/tunnel/get-started/' 25 350 320 | Out-Null
+New-LinkButton $Page 'ChatGPT MCP 官方说明' 'https://developers.openai.com/plugins/deploy/connect-chatgpt' 375 350 320 | Out-Null
+New-LinkButton $Page 'Go 下载（仅源码包）' 'https://go.dev/dl/' 25 403 320 | Out-Null
+New-LinkButton $Page '本项目 GitHub Releases' 'https://github.com/xydadada/question-bank-template/releases/latest' 375 403 320 | Out-Null
 
 if ($SelfCheck) {
     Write-Host 'Wizard controls loaded.'
