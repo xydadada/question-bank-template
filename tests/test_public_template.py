@@ -1846,6 +1846,30 @@ class PublicTemplateTests(unittest.TestCase):
         self.assertEqual(result, rule)
         remote.assert_not_called()
 
+    def test_local_classification_choice_uses_existing_fallback(self) -> None:
+        import ingest
+
+        rule = ingest.DocumentClassification(
+            "待分类", "未知机构", "综合", ("综合",), "rule", 0.2, (), 1
+        )
+        cfg = {
+            "document_classification": {
+                "taxonomy": {"version": 1},
+                "other_min_confidence": 0.9,
+            },
+            "ollama": {"mimo": {
+                "enabled": False,
+                "classification_fallback_to_ollama": True,
+            }},
+        }
+        with mock.patch.object(
+            ingest, "rule_classification", return_value=(rule, True, [], ["", ""])
+        ), mock.patch.object(
+            ingest, "mimo_classification", return_value=rule
+        ) as classify:
+            ingest.classify_group("uncertain", [], cfg)
+        classify.assert_called_once()
+
     def test_transient_cloud_failures_stay_retryable(self) -> None:
         import ingest
 

@@ -51,6 +51,21 @@ if (Get-Command ollama -ErrorAction SilentlyContinue) {
     Write-Warning "Ollama is not in PATH. Ensure '$EmbeddingModel' is available before indexing."
 }
 
+# WeKnora records this dimension when it creates the model and each knowledge
+# base. Check the actual Ollama output before creating either one.
+try {
+    $Embed = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/embed" `
+        -Method Post -ContentType "application/json" `
+        -Body (@{ model = $EmbeddingModel; input = "dimension check" } | ConvertTo-Json -Compress) `
+        -TimeoutSec 120
+} catch {
+    throw "Could not test embedding model '$EmbeddingModel' through local Ollama. Start Ollama and retry."
+}
+$ObservedDimension = @($Embed.embeddings[0]).Count
+if ($ObservedDimension -ne $EmbeddingDimension) {
+    throw "Embedding dimension mismatch for '$EmbeddingModel': actual=$ObservedDimension requested=$EmbeddingDimension. No knowledge base was changed."
+}
+
 $Models = Run-Json @("model", "list", "--limit", "10000", "--format", "json", "--profile", $Profile)
 $ModelRows = @($Models.data)
 $ExistingModel = $ModelRows | Where-Object {
@@ -138,6 +153,8 @@ $Text = Set-YamlScalar $Text "child_knowledge_base" $ChildId
 $Text = Set-YamlScalar $Text "raw_knowledge_base" $RawId
 $Text = Set-YamlScalar $Text "profile" $Profile
 $Text = Set-YamlScalar $Text "setup_profile" $Profile
+$Text = Set-YamlScalar $Text "embedding" $EmbeddingModel
+$Text = Set-YamlScalar $Text "embedding_dimension" ([string]$EmbeddingDimension)
 [System.IO.File]::WriteAllText($Config, $Text, [System.Text.UTF8Encoding]::new($false))
 
 & $Cli doctor --format json --profile $Profile
